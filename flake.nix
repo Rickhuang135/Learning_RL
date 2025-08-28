@@ -32,6 +32,7 @@
             stdenv.cc.cc.lib
             libsForQt5.wrapQtAppsHook
             ninja
+	    cudatoolkit
             python313Packages.pandas
             (python313Packages.matplotlib.override {
               enableQt = true;
@@ -49,6 +50,7 @@
           UV_PYTHON_PREFERENCE = "only-system";
           shellHook = ''
             export PYTHONWARNINGS="ignore"
+	    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${pkgs.linuxPackages.nvidia_x11}/lib:${pkgs.cudatoolkit}/lib
           '';
         };
       }

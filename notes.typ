@@ -85,4 +85,6 @@ Bellman's Principle of Optimality: The overall best policy must involve choosing
 
 = Deep Q Networks
 
+Deep Q neural networks allows for continuous states but not continous actions. 
+
 
