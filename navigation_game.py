@@ -5,6 +5,7 @@ gamma = 0.8
 learning_rate = 0.1
 
 class Env:
+    illegal_reward = -10
     def __init__(self, width: int, height: int, destination: tuple, walls: list[tuple]):
         self.destination = destination
         self.width = width
@@ -20,15 +21,15 @@ class Env:
             reward = 0
         elif x < 0 or x >= self.width:
             game_end = True
-            reward = -1000
+            reward = self.illegal_reward
         elif y < 0 or y >= self.height:
             game_end = True
-            reward = -1000
+            reward = self.illegal_reward
         else:
             for w in self.walls:
                 if w==point:
                     game_end = True
-                    reward = -1000
+                    reward = self.illegal_reward
                     break
         if game_end or self.move_count== max_moves-1:
             game_end = True
@@ -215,12 +216,13 @@ def evaluate():
     you = Agent(start, map)
     map.render(you.loc)
     epsilon = 0.9
-    total_runs = 5000
-    step_size = epsilon*10/total_runs
+    total_runs = 4000
+    step_size = epsilon/10
+    interval = total_runs//10
     for x in range(total_runs):
         # you.monte_carlo(epsilon)
         you.Q_learning(epsilon)
-        if x % 10 ==0:
+        if x % interval ==0:
             epsilon -= step_size
             print(epsilon)
     map.render(start)
