@@ -54,7 +54,7 @@ class TickTackToe:
                 return 1
             case 0: # draw
                 self.end = True
-                return 5
+                return 1
             case 1: # mover has won
                 self.end = True
                 return 0
