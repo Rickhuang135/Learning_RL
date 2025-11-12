@@ -6,7 +6,6 @@ import numpy as np
 from random import randint
 from random import random
 
-from time import sleep
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 torch.set_printoptions(sci_mode=False)
@@ -67,24 +66,25 @@ class Board:
 class DeepQModel(nn.Module): #inputs the current state of the board, outputs the expected return for making move at each grid
     def __init__(self):
         super(DeepQModel, self).__init__()
-        self.l1 = nn.Linear(9, 256, dtype=float)
+        self.l1 = nn.Linear(9, 1000, dtype=float)
         self.a1 = nn.ReLU()
-        self.l2 = nn.Linear(256, 256, dtype=float)
+        self.l2 = nn.Linear(1000, 80, dtype=float)
         self.a2 = nn.ReLU()
-        self.l3 = nn.Linear(256, 256, dtype=float)
+        self.l3 = nn.Linear(80, 80, dtype=float)
         self.a3 = nn.ReLU()
-        self.lo = nn.Linear(256,9, dtype=float)
-        self.ao = nn.ReLU()
+        self.lo = nn.Linear(80,9, dtype=float)
+        self.ao = nn.Softplus()
 
-        self.optimiser = optim.Adam(self.parameters(),lr=0.1)
+        self.optimiser = optim.Adam(self.parameters(),lr=0.001)
         self.criterion = nn.MSELoss()
         self.gamma=0.8
         self.verbose = False
     def forward(self, board: Board):
-        x = board.state.flatten()
-        x[x==-1]=0.5
+        x = torch.clone(board.state.flatten())
+        # x+=1
+        # print(f"processed x is:\n{x}")
         x = self.a1(self.l1(x))
-        # x = self.a2(self.l2(x))
+        x = self.a2(self.l2(x))
         # x = self.a3(self.l3(x))
         x = self.ao(self.lo(x))
         return x.reshape(3,3)
@@ -159,7 +159,7 @@ class Train:
         self.epsilon = 1.1
         self.gamma = 0.8
         self.criterion = nn.MSELoss()
-        self.optimiser = optim.Adam(self.model.parameters(),lr=0.05)
+        self.optimiser = optim.Adam(self.model.parameters(),lr=0.0005)
 
         self.verbose = False
 
@@ -167,12 +167,11 @@ class Train:
         model.train()
         Q = model(s)
         label = torch.clone(Q)
-        label[label==0]=1
         label[AM!=0]=value
         self.optimiser.zero_grad()
-        self.optimiser.step()
         loss= self.criterion(Q, label)
         loss.backward()
+        self.optimiser.step()
         if self.verbose:
             print(f"s: \n{s}")
             print(f"Q: \n{Q}")
@@ -221,7 +220,7 @@ class Train:
         return running_loss, (tr_p, tr_o)
 
 def train_loop(
-        episodes = 3000,
+        episodes = 10000,
         epsilon = 1.0
 ):
     interval = episodes//10
