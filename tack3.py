@@ -12,7 +12,7 @@ torch.set_printoptions(sci_mode=False)
 class Board:
     def __init__(self, isclone=False):
         if not isclone:
-            self.state = self.state=torch.tensor(np.zeros((3,3))).to(device)
+            self.state =torch.tensor(np.zeros((3,3))).to(device)
             self.legal_moves=torch.where(self.state==0,1,0)
             self.end =False
             self.winner = 0
@@ -79,8 +79,8 @@ class DeepQModel(nn.Module): #inputs the current state of the board, outputs the
         self.criterion = nn.MSELoss()
         self.gamma=0.8
         self.verbose = False
-    def forward(self, board: Board):
-        x = torch.clone(board.state.flatten())
+    def forward(self, mat3x3: torch.Tensor):
+        x = torch.clone(mat3x3.flatten())
         # x+=1
         # print(f"processed x is:\n{x}")
         x = self.a1(self.l1(x))
@@ -88,6 +88,7 @@ class DeepQModel(nn.Module): #inputs the current state of the board, outputs the
         # x = self.a3(self.l3(x))
         x = self.ao(self.lo(x))
         return x.reshape(3,3)
+    
 
 class Agent:
     def __init__(self, id: int, model: DeepQModel):
@@ -101,7 +102,7 @@ class Agent:
             Q=Q.reshape(3,3).to(device)
         else:
             with torch.no_grad():
-                Q = self.model(board)
+                Q = self.model(board.state)
         Q+= (board.legal_moves==0)*100
         min_a = torch.min(Q)
         AM =(Q==min_a) # AM is short for "addition matrix"
@@ -120,7 +121,7 @@ class Agent:
         with torch.no_grad():
             if random()<0.5:
                 while not end and not board.end:
-                    raw =model(board)
+                    raw =model(board.state)
                     bot_move = self.infer(board)
                     print(f"bot made move \n{bot_move}\n based on Q \n{ raw+(board.legal_moves==0)*100}")
                     board.write(bot_move)
@@ -138,7 +139,7 @@ class Agent:
                     AM = torch.zeros((3,3)).to(device)
                     AM[int(a),int(b)] = -1
                     board.write(AM)
-                    raw =model(board)
+                    raw =model(board.state)
                     bot_move = self.infer(board)
                     print(f"bot made move \n{bot_move}\n based on Q \n{ raw+(board.legal_moves==0)*100}")
                     board.write(bot_move)
@@ -165,10 +166,18 @@ class Train:
 
     def backprop(self, model: DeepQModel, s: Board, AM: torch.Tensor, value):
         model.train()
+        states= generate_symmetries(s.state)
+        positions=generate_symmetries(AM)
+        loss =0
+        for state, position in zip(states,positions):
+            loss+= self.backprop_ind(model,state,position,value)
+        return loss
+
+    def backprop_ind(self, model: DeepQModel, s: torch.Tensor, AM: torch.Tensor, value):
+        self.optimiser.zero_grad()
         Q = model(s)
         label = torch.clone(Q)
         label[AM!=0]=value
-        self.optimiser.zero_grad()
         loss= self.criterion(Q, label)
         loss.backward()
         self.optimiser.step()
@@ -204,9 +213,13 @@ class Train:
                     running_loss+=self.backprop(player.model, s0, AM0, self.r_lose)
                     running_loss+=self.backprop(opp.model,s1, AM1, self.r_win)
             else:
-                Q = player.model(s2)
+                s2s = generate_symmetries(s2.state)
+                s0s = generate_symmetries(s0.state)
+                Qs = [player.model(s).detach() for s in s2s]
+                AM0s = generate_symmetries(AM0)
                 tr_p += self.r_move
-                running_loss+=self.backprop(player.model,s0, AM0, self.r_move+self.gamma*Q[AM0!=0])
+                for Q, AM,s in zip(Qs, AM0,s0s):
+                    running_loss+=self.backprop_ind(player.model,s, AM, self.r_move+self.gamma*Q[AM!=0])
                 del AM0
                 AM0 = AM1
                 player, opp = opp, player
@@ -220,7 +233,7 @@ class Train:
         return running_loss, (tr_p, tr_o)
 
 def train_loop(
-        episodes = 10000,
+        episodes = 1000,
         epsilon = 1.0
 ):
     interval = episodes//10
@@ -240,7 +253,14 @@ def train_loop(
             epsilon -= step_size
     return train
 
-
+def generate_symmetries(mat3x3: torch.Tensor) -> list[torch.Tensor]:
+    results = []
+    results.append(torch.clone(mat3x3))
+    results.append(torch.flip(mat3x3,[1,0]))
+    results.append(torch.fliplr(mat3x3))
+    results.append(torch.flipud(mat3x3))
+    results.append(torch.transpose(mat3x3,1,0))
+    return results
 
 
     
