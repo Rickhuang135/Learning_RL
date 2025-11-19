@@ -2,65 +2,14 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+from tack_board import *
 import numpy as np
 from random import randint
 from random import random
-
+from random import choice
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 torch.set_printoptions(sci_mode=False)
-class Board:
-    def __init__(self, isclone=False):
-        if not isclone:
-            self.state =torch.tensor(np.zeros((3,3))).to(device)
-            self.legal_moves=torch.where(self.state==0,1,0)
-            self.end =False
-            self.winner = 0
-            
-    def __str__(self):
-        return f"{self.state}"
-
-    def write(self, addition_matrix):
-        self.state+=addition_matrix
-        self.legal_moves[addition_matrix!=0]=0
-        value = addition_matrix[addition_matrix!=0][0] # assumes one move at a time
-        match self.is_end():
-            case 1:
-                self.end = True
-                self.winner = value
-            case 0:
-                self.end = True
-                self.winner = 0
-            case -1:
-                self.end = False
-        
-    def next(self, addition_matrix):
-        result = self.copy()
-        result.write(addition_matrix)
-        result.state*=-1
-        return result
-
-    def copy(self):
-        b=Board(True)
-        b.state=torch.clone(self.state)
-        b.legal_moves=self.legal_moves
-        b.end=self.end
-        return b
-    
-    def is_end(self) -> int: # 1 for win, 0 for draw, -1 for continue
-        horizontal_sums = self.state.sum(1)
-        if torch.max(torch.abs(horizontal_sums))==3:
-            return 1
-        vertical_sums = self.state.sum(0)
-        if torch.max(torch.abs(vertical_sums))==3:
-            return 1
-        forward_slash = self.state[torch.arange(3), torch.arange(3)]
-        backward_slash = self.state[torch.arange(3), [2,1,0]]
-        if abs(torch.sum(forward_slash)) == 3 or abs(torch.sum(backward_slash))==3:
-            return 1
-        if len((self.state==0).nonzero()) == 0: # all squares are filled
-            return 0
-        return -1
     
 
 class DeepQModel(nn.Module): #inputs the current state of the board, outputs the expected return for making move at each grid
@@ -89,6 +38,44 @@ class DeepQModel(nn.Module): #inputs the current state of the board, outputs the
         x = self.ao(self.lo(x))
         return x.reshape(3,3)
     
+class MCTS:
+    c = np.sqrt(2) # exploration parameter
+
+    def __init__(self, action, head):
+        self.head:MCTS =head
+        self.action = action
+        self.visits=1
+        self.children: list[MCTS]=[]
+        # implement code to get reward
+        self.reward: int|None = None
+
+    def UCB(self):
+        if self.reward is None:
+            raise Exception("Node not finished, cannot evaluate")
+        return self.reward + self.c*np.sqrt(np.log(self.head.visits)/self.visits)
+
+    def next(self, actions: torch.Tensor):
+        new_acts = []
+        existing_acts=[child.action for child in self.children]
+        for act in actions:
+            if not act in existing_acts:
+                new_acts.append(act)
+        if len(new_acts):
+            return MCTS(choice(new_acts), self)
+        UCBs= np.array([child.UCB() for child in self.children])
+        return self.children[np.argmin(UCBs)]
+
+            
+
+    # run from starting state to end
+        # at starting state, gets list of actions
+        # check for new action, take if exist
+        # check which child has lowest UCB
+        # repeat until new action is reached 
+    # when creating new leaf
+        # randomly make moves until terminal state reach
+        # create new child with reward and visit count
+    # create leaf based on first action and reward
 
 class Agent:
     def __init__(self, id: int, model: DeepQModel):
@@ -231,9 +218,18 @@ class Train:
         del s1
         del AM0
         return running_loss, (tr_p, tr_o)
+    
+def generate_symmetries(mat3x3: torch.Tensor) -> list[torch.Tensor]:
+    results = []
+    results.append(torch.clone(mat3x3))
+    results.append(torch.flip(mat3x3,[1,0]))
+    results.append(torch.fliplr(mat3x3))
+    results.append(torch.flipud(mat3x3))
+    results.append(torch.transpose(mat3x3,1,0))
+    return results
 
 def train_loop(
-        episodes = 1000,
+        episodes = 200,
         epsilon = 1.0
 ):
     interval = episodes//10
@@ -253,18 +249,26 @@ def train_loop(
             epsilon -= step_size
     return train
 
-def generate_symmetries(mat3x3: torch.Tensor) -> list[torch.Tensor]:
-    results = []
-    results.append(torch.clone(mat3x3))
-    results.append(torch.flip(mat3x3,[1,0]))
-    results.append(torch.fliplr(mat3x3))
-    results.append(torch.flipud(mat3x3))
-    results.append(torch.transpose(mat3x3,1,0))
-    return results
+def train_loop2():
+    s0 = Board()
+    player = Agent(1, DeepQModel())
+    head = MCTS(0, None)
+    actions = torch.arange(9)[s0.legal_moves.flatten()==1]
+    current_node = head.next(actions)
+    while not current_node.reward is None:
+        current_node=current_node.next(s0)
+    total_reward = 0
+    while not s0.end:
+        s0.write(player.infer(s0,2))
+        total_reward+=1
+        if s0.end:
+            current_node.reward=20
+        
 
 
-    
-play=train_loop().a1.play
+# train_loop2()
+a1=train_loop().a1
+play(a1.infer)
 
 
                     
