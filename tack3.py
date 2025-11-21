@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from tack_board import *
+from tack_nn import DeepQModel
 import numpy as np
 from random import randint
 from random import random
@@ -10,33 +11,6 @@ from random import choice
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 torch.set_printoptions(sci_mode=False)
-    
-
-class DeepQModel(nn.Module): #inputs the current state of the board, outputs the expected return for making move at each grid
-    def __init__(self):
-        super(DeepQModel, self).__init__()
-        self.l1 = nn.Linear(9, 1000, dtype=float)
-        self.a1 = nn.ReLU()
-        self.l2 = nn.Linear(1000, 80, dtype=float)
-        self.a2 = nn.ReLU()
-        self.l3 = nn.Linear(80, 80, dtype=float)
-        self.a3 = nn.ReLU()
-        self.lo = nn.Linear(80,9, dtype=float)
-        self.ao = nn.Softplus()
-
-        self.optimiser = optim.Adam(self.parameters(),lr=0.001)
-        self.criterion = nn.MSELoss()
-        self.gamma=0.8
-        self.verbose = False
-    def forward(self, mat3x3: torch.Tensor):
-        x = torch.clone(mat3x3.flatten())
-        # x+=1
-        # print(f"processed x is:\n{x}")
-        x = self.a1(self.l1(x))
-        x = self.a2(self.l2(x))
-        # x = self.a3(self.l3(x))
-        x = self.ao(self.lo(x))
-        return x.reshape(3,3)
     
 class MCTS:
     c = np.sqrt(2) # exploration parameter
@@ -65,8 +39,6 @@ class MCTS:
         UCBs= np.array([child.UCB() for child in self.children])
         return self.children[np.argmin(UCBs)]
 
-            
-
     # run from starting state to end
         # at starting state, gets list of actions
         # check for new action, take if exist
@@ -78,66 +50,32 @@ class MCTS:
     # create leaf based on first action and reward
 
 class Agent:
-    def __init__(self, id: int, model: DeepQModel):
-        self.model = model
+    def __init__(self, id: int, Q: DeepQModel):
+        self.Q = Q
         self.id = id # id can not be zero
 
     def infer(self, board: Board, epsilon: float = 0.0):
-        self.model.eval()
+        self.Q.eval()
         if random() < epsilon:
-            Q = torch.randperm(9)
-            Q=Q.reshape(3,3).to(device)
+            Qa = torch.randperm(9).to(device)
         else:
             with torch.no_grad():
-                Q = self.model(board.state)
-        Q+= (board.legal_moves==0)*100
-        min_a = torch.min(Q)
-        AM =(Q==min_a) # AM is short for "addition matrix"
+                Qa = self.Q(board.state)
+        Qa+= (board.legal_moves.flatten()==0)*100
+        min_a = torch.min(Qa)
+        AM =(Qa==min_a) # AM is short for "addition matrix"
         n_moves = len(AM[AM])
         if n_moves != 1:
             ord=torch.randperm(n_moves).to(device)
-            Q[AM]+= ord
-            AM = (Q==min_a)
-        return AM*self.id
-
-    def play(self):
-        end = False
-        board = Board()
-        model = self.model
-        model.eval()
-        with torch.no_grad():
-            if random()<0.5:
-                while not end and not board.end:
-                    raw =model(board.state)
-                    bot_move = self.infer(board)
-                    print(f"bot made move \n{bot_move}\n based on Q \n{ raw+(board.legal_moves==0)*100}")
-                    board.write(bot_move)
-                    print(board.state)
-                    move = input("")
-                    a,b = move.split(",")
-                    AM = torch.zeros((3,3)).to(device)
-                    AM[int(a),int(b)] = -1
-                    board.write(AM)
-            else:
-                while not end and not board.end:
-                    print(board.state)
-                    move = input("")
-                    a,b = move.split(",")
-                    AM = torch.zeros((3,3)).to(device)
-                    AM[int(a),int(b)] = -1
-                    board.write(AM)
-                    raw =model(board.state)
-                    bot_move = self.infer(board)
-                    print(f"bot made move \n{bot_move}\n based on Q \n{ raw+(board.legal_moves==0)*100}")
-                    board.write(bot_move)
-
-                
+            Qa[AM]+= ord
+            AM = (Qa==min_a)
+        return AM.reshape(3,3)*self.id
                 
 class Train:
     def __init__(self):
-        self.model = DeepQModel().to(device)
-        self.a1 = Agent(1, self.model)
-        self.a2 = Agent(1, self.model)
+        self.Q = DeepQModel().to(device)
+        self.a1 = Agent(1, self.Q)
+        self.a2 = Agent(1, self.Q)
 
         self.r_win = 0
         self.r_lose = 20
@@ -147,30 +85,30 @@ class Train:
         self.epsilon = 1.1
         self.gamma = 0.8
         self.criterion = nn.MSELoss()
-        self.optimiser = optim.Adam(self.model.parameters(),lr=0.0005)
+        self.optimiser = optim.Adam(self.Q.parameters(),lr=0.0005)
 
         self.verbose = False
 
-    def backprop(self, model: DeepQModel, s: Board, AM: torch.Tensor, value):
-        model.train()
+    def backprop(self, Q: DeepQModel, s: Board, AM: torch.Tensor, value):
+        Q.train()
         states= generate_symmetries(s.state)
         positions=generate_symmetries(AM)
         loss =0
         for state, position in zip(states,positions):
-            loss+= self.backprop_ind(model,state,position,value)
+            loss+= self.backprop_ind(Q,state,position,value)
         return loss
 
-    def backprop_ind(self, model: DeepQModel, s: torch.Tensor, AM: torch.Tensor, value):
+    def backprop_ind(self, Q: DeepQModel, s: torch.Tensor, AM: torch.Tensor, value):
         self.optimiser.zero_grad()
-        Q = model(s)
-        label = torch.clone(Q)
+        Qa = Q(s)
+        label = torch.clone(Qa)
         label[AM!=0]=value
-        loss= self.criterion(Q, label)
+        loss= self.criterion(Qa, label)
         loss.backward()
         self.optimiser.step()
         if self.verbose:
             print(f"s: \n{s}")
-            print(f"Q: \n{Q}")
+            print(f"Qa: \n{Qa}")
             print(f"label: \n{label}")
             print(f"loss: {loss}")
         return loss.item()
@@ -192,21 +130,22 @@ class Train:
                 if s2.winner == 0: # draw
                     tr_p += self.r_draw
                     tr_o += self.r_draw
-                    running_loss+=self.backprop(player.model,s0, AM0, self.r_draw)
-                    running_loss+=self.backprop(opp.model,s1, AM1, self.r_draw)
+                    running_loss+=self.backprop(player.Q,s0, AM0, self.r_draw)
+                    running_loss+=self.backprop(opp.Q,s1, AM1, self.r_draw)
                 else:
                     tr_p += self.r_lose
                     tr_o += self.r_win
-                    running_loss+=self.backprop(player.model, s0, AM0, self.r_lose)
-                    running_loss+=self.backprop(opp.model,s1, AM1, self.r_win)
+                    running_loss+=self.backprop(player.Q, s0, AM0, self.r_lose)
+                    running_loss+=self.backprop(opp.Q,s1, AM1, self.r_win)
             else:
                 s2s = generate_symmetries(s2.state)
                 s0s = generate_symmetries(s0.state)
-                Qs = [player.model(s).detach() for s in s2s]
+                Qas = [player.Q(s).detach() for s in s2s]
                 AM0s = generate_symmetries(AM0)
                 tr_p += self.r_move
-                for Q, AM,s in zip(Qs, AM0,s0s):
-                    running_loss+=self.backprop_ind(player.model,s, AM, self.r_move+self.gamma*Q[AM!=0])
+                for Qa, AM,s in zip(Qas, AM0s,s0s):
+                    AM=AM.flatten()
+                    running_loss+=self.backprop_ind(player.Q,s, AM, self.r_move+self.gamma*Qa[AM!=0])
                 del AM0
                 AM0 = AM1
                 player, opp = opp, player
@@ -226,10 +165,10 @@ def generate_symmetries(mat3x3: torch.Tensor) -> list[torch.Tensor]:
     results.append(torch.fliplr(mat3x3))
     results.append(torch.flipud(mat3x3))
     results.append(torch.transpose(mat3x3,1,0))
-    return results
+    return [r.flatten() for r in results]
 
 def train_loop(
-        episodes = 200,
+        episodes = 400,
         epsilon = 1.0
 ):
     interval = episodes//10
@@ -249,20 +188,20 @@ def train_loop(
             epsilon -= step_size
     return train
 
-def train_loop2():
-    s0 = Board()
-    player = Agent(1, DeepQModel())
-    head = MCTS(0, None)
-    actions = torch.arange(9)[s0.legal_moves.flatten()==1]
-    current_node = head.next(actions)
-    while not current_node.reward is None:
-        current_node=current_node.next(s0)
-    total_reward = 0
-    while not s0.end:
-        s0.write(player.infer(s0,2))
-        total_reward+=1
-        if s0.end:
-            current_node.reward=20
+# def train_loop2():
+#     s0 = Board()
+#     player = Agent(1, DeepQModel())
+#     head = MCTS(0, None)
+#     actions = torch.arange(9)[s0.legal_moves.flatten()==1]
+#     current_node = head.next(actions)
+#     while not current_node.reward is None:
+#         current_node=current_node.next(s0)
+#     total_reward = 0
+#     while not s0.end:
+#         s0.write(player.infer(s0,2))
+#         total_reward+=1
+#         if s0.end:
+#             current_node.reward=20
         
 
 
@@ -275,24 +214,24 @@ play(a1.infer)
 
  
 # begin
-# make actual move at s0 using Q0, creating s1
+# make actual move at s0 using Qa0, creating s1
 
 # while not end:
-# opponent makes theoretical best move/random move at s1 using Q1, creating s2
-    # if board ends with draw, update model with 
+# opponent makes theoretical best move/random move at s1 using Qa1, creating s2
+    # if board ends with draw, update Q with 
     #   [draw] at s0
     # else:
     #   [loss] at s0
     #   [win] at s1
-# inference to get Q2 at s2
-# update model at s0 using Q2
+# inference to get Qa2 at s2
+# update Q at s0 using Qa2
 
 # s1 becomes s0, s2 becomes s1
-# Q1 becomes Q0, Q2 becomes Q1
+# Qa1 becomes Qa0, Qa2 becomes Qa1
 
 
 # components:
 # 1. Board
 # 2. Reward giving environment
-# 3. Agent which uses Q values to make moves and update model
-# 4. Model(s) which gives Q values
+# 3. Agent which uses Qa values to make moves and update Q
+# 4. Model(s) which gives Qa values
