@@ -87,6 +87,29 @@ Bellman's Principle of Optimality: The overall best policy must involve choosing
 
 Deep Q neural networks allows for continuous states but not continous actions. Off-policy Q-learning is used to approximate the action-value function. Epislon greedy balances exploitation and exploration.
 
+== Q-learning logic for tic tac toe
+
+begin\
+make actual move at s0 using Qa0, creating s1\
+
+while not end:\
+opponent makes theoretical best move/random move at s1 using Qa1, creating s2\
+    if board ends with draw, update Q with \
+      [draw] at s0\
+    else:\
+      [loss] at s0\
+      [win] at s1\
+inference to get Qa2 at s2\
+update Q at s0 using Qa2\
+
+s1 becomes s0, s2 becomes s1\
+Qa1 becomes Qa0, Qa2 becomes Qa1\
+
+components:
++ Board
++ Reward giving environment
++ Agent which uses Qa values to make moves and update Q
++ Model(s) which gives Qa values
 
 = Policy gradients
 
