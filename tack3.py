@@ -139,12 +139,13 @@ class Train:
             else:
                 s2s = generate_symmetries(s2.state)
                 s0s = generate_symmetries(s0.state)
-                Q2as = [player.Q(s).detach() for s in s2s]
+                Pi2s = [player.infer(s) for s in s2s]
+                Qa2s = [player.Q(s).detach() for s in s2s]
                 AM0s = generate_symmetries(AM0)
                 tr_p += self.r_move
-                for Qa, AM,s in zip(Qas, AM0s,s0s):
+                for Qa, AM,s in zip(Qa2s, AM0s,s0s):
                     AM=AM.flatten()
-                    Q_loss+=self.backprop_ind(player.Q,s, AM, self.r_move+self.gamma*Qa]) # using expected SARSA
+                    Q_loss+=self.backprop_ind(player.Q,s, AM, self.r_move+self.gamma*torch.sum(Qa)) # using expected SARSA
                 del AM0
                 AM0 = AM1
                 # player, opp = opp, player
