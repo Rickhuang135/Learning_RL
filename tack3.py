@@ -91,16 +91,16 @@ class Train:
 
     def backprop(self, Q: DeepQModel, s: Board, AM: torch.Tensor, value):
         Q.train()
-        states= generate_symmetries(s.state)
-        positions=generate_symmetries(AM)
+        states= s.generate_symmetries()
+        AMs=generate_symmetries(AM)
         loss =0
-        for state, position in zip(states,positions):
-            loss+= self.backprop_ind(Q,state,position,value)
+        for state, moves in zip(states,AMs):
+            loss+= self.backprop_ind(Q,state,moves.flatten(),value)
         return loss
 
-    def backprop_ind(self, Q: DeepQModel, s: torch.Tensor, AM: torch.Tensor, value):
+    def backprop_ind(self, Q: DeepQModel, s: Board, AM: torch.Tensor, value):
         self.optimiser.zero_grad()
-        Qa = Q(s)
+        Qa = Q(s.state)
         label = torch.clone(Qa)
         label[AM!=0]=value
         loss= self.criterion(Qa, label)
@@ -108,8 +108,8 @@ class Train:
         self.optimiser.step()
         if self.verbose:
             print(f"s: \n{s}")
-            print(f"Qa: \n{Qa}")
-            print(f"label: \n{label}")
+            print(f"Qa: \n{Qa.reshape(3,3)}")
+            print(f"label: \n{label.reshape(3,3)}")
             print(f"loss: {loss}")
         return loss.item()
 
@@ -127,6 +127,10 @@ class Train:
             AM1 = opp.infer(s1, epsilon)
             s2 = s1.next(AM1)
             if s2.end: # board ends
+                if self.verbose:
+                    print(f"s0: \n{s0}")
+                    print(f"s1: \n{s1}")
+                    print(f"s2: \n{s2}")
                 if s2.winner == 0: # draw
                     tr_p += self.r_draw
                     tr_o += self.r_draw
@@ -138,14 +142,24 @@ class Train:
                     running_loss+=self.backprop(player.Q, s0, AM0, self.r_lose)
                     running_loss+=self.backprop(opp.Q,s1, AM1, self.r_win)
             else:
-                s2s = generate_symmetries(s2.state)
-                s0s = generate_symmetries(s0.state)
-                Qas = [player.Q(s).detach() for s in s2s]
+                s2s = s2.generate_symmetries()
+                s0s = s0.generate_symmetries()
+                Qas = [player.Q(s.state).detach() for s in s2s]
+                AM2s = [player.infer(s,epsilon=0) for s in s2s]
+                target_values = [self.r_move+self.gamma*Qai[AM2i.flatten()!=0] for Qai, AM2i in zip(Qas,AM2s)]
                 AM0s = generate_symmetries(AM0)
                 tr_p += self.r_move
-                for Qa, AM,s in zip(Qas, AM0s,s0s):
-                    AM=AM.flatten()
-                    running_loss+=self.backprop_ind(player.Q,s, AM, self.r_move+self.gamma*Qa[AM!=0])
+                if self.verbose:
+                    print(f"s0: \n{s0}")
+                    print(f"s1: \n{s1}")
+                    print(f"s2: \n{s2}")
+                    print(f"Qa0: \n{player.Q(s0.state).reshape(3,3)}")
+                    print(f"Qa0: \n{player.Q(s1.state).reshape(3,3)}")
+                    print(f"Qa2: \n{torch.clone(Qas[0]).reshape(3,3)}")
+                    print(f"target value: {target_values[0]}")
+                for AM,s, target_value in zip(AM0s, s0s, target_values):
+                    AM = AM.flatten()
+                    running_loss+=self.backprop_ind(player.Q,s, AM, target_value)
                 del AM0
                 AM0 = AM1
                 player, opp = opp, player
@@ -157,18 +171,9 @@ class Train:
         del s1
         del AM0
         return running_loss, (tr_p, tr_o)
-    
-def generate_symmetries(mat3x3: torch.Tensor) -> list[torch.Tensor]:
-    results = []
-    results.append(torch.clone(mat3x3))
-    results.append(torch.flip(mat3x3,[1,0]))
-    results.append(torch.fliplr(mat3x3))
-    results.append(torch.flipud(mat3x3))
-    results.append(torch.transpose(mat3x3,1,0))
-    return [r.flatten() for r in results]
 
 def train_loop(
-        episodes = 400,
+        episodes = 10,
         epsilon = 1.0
 ):
     interval = episodes//10
@@ -233,5 +238,5 @@ play(a1.infer)
 # components:
 # 1. Board
 # 2. Reward giving environment
-# 3. Agent which uses Qa values to make moves and update Q
-# 4. Model(s) which gives Qa values
+# 3. Agent which uses Qa target_values to make moves and update Q
+# 4. Model(s) which gives Qa target_values

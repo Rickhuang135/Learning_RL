@@ -5,9 +5,12 @@ from random import random
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 class Board:
-    def __init__(self, isclone=False):
+    def __init__(self,  init_state=None, isclone=False):
         if not isclone:
-            self.state =torch.tensor(np.zeros((3,3))).to(device)
+            if init_state is None:
+                self.state =torch.tensor(np.zeros((3,3))).to(device)
+            else:
+                self.state: torch.Tensor = init_state
             self.legal_moves=torch.where(self.state==0,1,0)
             self.end =False
             self.winner = 0
@@ -33,7 +36,7 @@ class Board:
         return result
 
     def copy(self):
-        b=Board(True)
+        b=Board(isclone=True)
         b.state=torch.clone(self.state)
         b.legal_moves=torch.clone(self.legal_moves)
         b.end=self.end
@@ -60,6 +63,10 @@ class Board:
     def __str__(self):
         return self.__repr__()
     
+    def generate_symmetries(self) -> list:
+        mat3x3 = self.state
+        return [Board(init_state=mat) for mat in generate_symmetries(mat3x3)]
+    
 def play(Agent,init_board=None,player_turn=False):
     if init_board is None:
         board=Board()
@@ -81,3 +88,12 @@ def play(Agent,init_board=None,player_turn=False):
             AM = Agent(board)
         board.write(AM)
         return play(Agent, board, not player_turn)
+
+def generate_symmetries(mat3x3: torch.Tensor) -> list[torch.Tensor]:
+    results = []
+    results.append(torch.clone(mat3x3))
+    results.append(torch.flip(mat3x3,[1,0]))
+    results.append(torch.fliplr(mat3x3))
+    results.append(torch.flipud(mat3x3))
+    results.append(torch.transpose(mat3x3,1,0))
+    return results
