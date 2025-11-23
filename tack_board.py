@@ -58,7 +58,7 @@ class Board:
         return -1
     
     def __repr__(self):
-        return str(self.state.numpy())
+        return str(self.state.cpu().numpy())
     
     def __str__(self):
         return self.__repr__()

@@ -1,53 +1,19 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import numpy as np
 
-from tack_board import play
-from tack_board import Board
+from tack_board import *
 from tack_nn import DeepQModel
 from tack_nn import PolicyModel
-import numpy as np
-from random import choice
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 torch.set_printoptions(sci_mode=False)
-    
-class MCTS:
-    c = np.sqrt(2) # exploration parameter
+np.set_printoptions(precision = 3)
 
-    def __init__(self, action, head):
-        self.head:MCTS =head
-        self.action = action
-        self.visits=1
-        self.children: list[MCTS]=[]
-        # implement code to get reward
-        self.reward: int|None = None
-
-    def UCB(self):
-        if self.reward is None:
-            raise Exception("Node not finished, cannot evaluate")
-        return self.reward + self.c*np.sqrt(np.log(self.head.visits)/self.visits)
-
-    def next(self, actions: torch.Tensor):
-        new_acts = []
-        existing_acts=[child.action for child in self.children]
-        for act in actions:
-            if not act in existing_acts:
-                new_acts.append(act)
-        if len(new_acts):
-            return MCTS(choice(new_acts), self)
-        UCBs= np.array([child.UCB() for child in self.children])
-        return self.children[np.argmin(UCBs)]
-
-    # run from starting state to end
-        # at starting state, gets list of actions
-        # check for new action, take if exist
-        # check which child has lowest UCB
-        # repeat until new action is reached 
-    # when creating new leaf
-        # randomly make moves until terminal state reach
-        # create new child with reward and visit count
-    # create leaf based on first action and reward
+def pt(matflat: torch.Tensor):
+    mat3x3=matflat.reshape(3,3)
+    print(mat3x3.detach().cpu().numpy())
 
 class Agent:
     def __init__(self, id: int, Q: DeepQModel, Pi:PolicyModel):
@@ -57,14 +23,15 @@ class Agent:
 
     def infer(self, board: Board):
         self.Pi.eval()
-        raw_dist: torch.Tensor = self.Pi(board.state)
-        raw_dist[(board.legal_moves.flatten()==0)]=0
-        legal_dist = raw_dist/torch.sum(raw_dist)
-        cum_dist = legal_dist.cumsum(0)
-        idx = torch.searchsorted(cum_dist, torch.rand(1))
-        AM: torch.Tensor = torch.zeros(9)
-        AM[idx]=1
-        return AM.reshape((3,3)), legal_dist
+        with torch.no_grad():
+            raw_dist: torch.Tensor = self.Pi(board.state)
+            raw_dist[(board.legal_moves.flatten()==0)]=0
+            legal_dist = raw_dist/torch.sum(raw_dist)
+            cum_dist = legal_dist.cumsum(0)
+            idx = torch.searchsorted(cum_dist, torch.rand(1).to(device)).to(device)
+            AM: torch.Tensor = torch.zeros(9).to(device)
+            AM[idx]=1
+            return AM.reshape((3,3)), legal_dist
                 
 class Train:
     def __init__(self):
@@ -79,6 +46,7 @@ class Train:
         self.r_move = 1
 
         self.gamma = 0.8
+        self.Psi_discount = 0.01
         self.criterionQ = nn.MSELoss()
         self.optimiserQ = optim.Adam(self.Q.parameters(),lr=0.0005)
         self.criterionPi = nn.CrossEntropyLoss()
@@ -86,28 +54,56 @@ class Train:
 
         self.verbose = False
 
-    def backprop(self, Q: DeepQModel, s: Board, AM: torch.Tensor, value):
+    def backprop(self, Q: DeepQModel, Pi: PolicyModel, s: Board, AM: torch.Tensor, Pi0: torch.Tensor, value, Qa0):
         Q.train()
-        states= generate_symmetries(s.state)
+        states= s.generate_symmetries()
         AMs=generate_symmetries(AM)
-        loss =0
+        lossPi= lossQ =0
         for state, position in zip(states,AMs):
-            loss+= self.backprop_ind(Q,state,position,value)
-        return loss
+            position = position.flatten()
+            lossQ+= self.Q_backprop(Q,state,position,value)
+            lossPi+=self.Pi_backprop(Pi, s, position, Pi0, Qa0-value)
+        return  lossQ, lossPi
 
-    def backprop_ind(self, Q: DeepQModel, s: torch.Tensor, AM: torch.Tensor, value):
+    def Q_backprop(self, Q: DeepQModel, s: Board, AM: torch.Tensor, value):
         self.optimiserQ.zero_grad()
-        Qa = Q(s)
+        Qa = Q(s.state)
         label = torch.clone(Qa)
         label[AM!=0]=value
         loss= self.criterionQ(Qa, label)
         loss.backward()
         self.optimiserQ.step()
         if self.verbose:
+            print(f"\n\nInstance of Q_backprop\n")
             print(f"s: \n{s}")
-            print(f"Qa: \n{Qa}")
-            print(f"label: \n{label}")
+            print("Qa")
+            pt(Qa)
+            print(f"label:")
+            pt(label)
             print(f"loss: {loss}")
+        return loss.item()
+
+    def Pi_backprop(self, Pi: PolicyModel, s: Board, AM: torch.Tensor, Pi0:torch.Tensor, Psi):
+        self.optimiserPi.zero_grad()
+        Pis = Pi(s.state)
+        label = torch.clone(Pi0)
+        label[AM!=0]+=Psi*self.Psi_discount
+        loss = self.criterionPi(Pis, Pi0)
+        loss.backward()
+        self.optimiserPi.step()
+        # if self.verbose:
+        #     print("\n\nInstance of Pi_backprop\n")
+        #     print(f"s: \n{s}")  
+        #     print("Pis")
+        #     pt(Pis)
+        #     print("AM")
+        #     pt(AM)
+        #     print("raw_label")
+        #     pt(Pi0)
+        #     print(f"Psi: \n{Psi.cpu().item()}")
+        #     print("label")
+        #     pt(label)
+        #     print(f"loss: {loss}")
         return loss.item()
 
     def episode(self):
@@ -125,51 +121,58 @@ class Train:
         while not s1.end:
             AM1, Pi1 = opp.infer(s1)
             s2 = s1.next(AM1)
+            player.Q.eval()
+            Qa0 = player.Q(s0.state)[AM0.flatten()==1]
             if s2.end: # board ends
                 if s2.winner == 0: # draw
                     tr_p += self.r_draw
                     tr_o += self.r_draw
-                    Q_loss+=self.backprop(player.Q, s0, AM0, self.r_draw)
-                    Q_loss+=self.backprop(opp.Q,s1, AM1, self.r_draw)
+                    tmp=self.backprop(player.Q, player.Pi, s0, AM0, Pi0, self.r_draw,Qa0)
+                    Q_loss += tmp[0]
+                    Pi_loss += tmp[1]
+                    tmp=self.backprop(opp.Q,opp.Pi, s1,  AM1, Pi1,self.r_draw, Qa0)
+                    Q_loss += tmp[0]
+                    Pi_loss += tmp[1]
                 else:
                     tr_p += self.r_lose
                     tr_o += self.r_win
-                    Q_loss+=self.backprop(player.Q, s0, AM0, self.r_lose)
-                    Q_loss+=self.backprop(opp.Q,s1, AM1, self.r_win)
+                    tmp=self.backprop(player.Q, player.Pi, s0, AM0, Pi0,self.r_lose, Qa0)
+                    Q_loss += tmp[0]
+                    Pi_loss += tmp[1]
+                    tmp=self.backprop(opp.Q,opp.Pi, s1, AM1, Pi1,self.r_win,Qa0)
+                    Q_loss += tmp[0]
+                    Pi_loss += tmp[1]
             else:
-                s2s = generate_symmetries(s2.state)
-                s0s = generate_symmetries(s0.state)
-                Pi2s = [player.infer(s) for s in s2s]
-                Qa2s = [player.Q(s).detach() for s in s2s]
+                s2s = s2.generate_symmetries()
+                s0s = s0.generate_symmetries()
+                Pi0s = generate_symmetries(Pi0.reshape(3,3))
+                Pi2s = [player.infer(s)[1] for s in s2s]
+                Qa2s = [player.Q(s.state).detach() for s in s2s]
                 AM0s = generate_symmetries(AM0)
                 tr_p += self.r_move
-                for Qa, AM,s in zip(Qa2s, AM0s,s0s):
+                player.Q.train()
+                player.Pi.train()
+                for Qa2, AM, s, Pi2, Pi0 in zip(Qa2s, AM0s, s0s, Pi2s, Pi0s):
                     AM=AM.flatten()
-                    Q_loss+=self.backprop_ind(player.Q,s, AM, self.r_move+self.gamma*torch.sum(Qa)) # using expected SARSA
-                del AM0
-                AM0 = AM1
+                    Pi0=Pi0.flatten()
+                    expected_Q2=torch.sum(Qa2*Pi2)
+                    Psi = Qa0 - expected_Q2
+                    Pi_loss += self.Pi_backprop(player.Pi, s, AM, Pi0, Psi)
+                    Q_loss+=self.Q_backprop(player.Q, s, AM, self.r_move+self.gamma*expected_Q2) # using expected SARSA
+                del AM0, Pi0
+                AM0, Pi0 = AM1, Pi1
                 # player, opp = opp, player
                 tr_p,tr_o = tr_o, tr_p
-            Psi = player.Q(s0)[AM0==1]-torch.sum(player.Q(s1)*player.Pi(s1)) # how much the state value changed based on the Policy move
-            del AM1
-            del s0
+            
+            del AM1, s0, Pi1
             s0 = s1
             s1 = s2
-        del s1
-        del AM0
+        del s1, AM0
         return Pi_loss, Q_loss, (tr_p, tr_o)
     
-def generate_symmetries(mat3x3: torch.Tensor) -> list[torch.Tensor]:
-    results = []
-    results.append(torch.clone(mat3x3))
-    results.append(torch.flip(mat3x3,[1,0]))
-    results.append(torch.fliplr(mat3x3))
-    results.append(torch.flipud(mat3x3))
-    results.append(torch.transpose(mat3x3,1,0))
-    return [r.flatten() for r in results]
-
+    
 def train_loop(
-        episodes = 400,
+        episodes = 10,
 ):
     
     train = Train()
@@ -177,31 +180,13 @@ def train_loop(
     for i in range(episodes):
         Pi_loss, Q_loss, (tr_1, tr_2) = train.episode()
         if i % 7 == 0:
-            print(f"Pi_loss: {Pi_loss:.3g} \t Q_loss: {Q_loss:.3g} \t total_rewards: {tr_1:>3}, {tr_2:>5}")
-        if episodes-i <= 3:
+            print(f"{round(i/episodes*100)}% Pi_loss: {Pi_loss:.3f} \t Q_loss: {Q_loss:.3f} \t total_rewards: {tr_1:>3}, {tr_2:>5}")
+        if episodes-i <= 2:
             train.verbose=True
     return train
 
-# def train_loop2():
-#     s0 = Board()
-#     player = Agent(1, DeepQModel())
-#     head = MCTS(0, None)
-#     actions = torch.arange(9)[s0.legal_moves.flatten()==1]
-#     current_node = head.next(actions)
-#     while not current_node.reward is None:
-#         current_node=current_node.next(s0)
-#     total_reward = 0
-#     while not s0.end:
-#         s0.write(player.infer(s0,2))
-#         total_reward+=1
-#         if s0.end:
-#             current_node.reward=20
-        
-
-
-# train_loop2()
 a1=train_loop().a1
-play(a1.infer)
+play(lambda board: a1.infer(board)[0])
 
 
 # begin

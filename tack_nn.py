@@ -24,12 +24,12 @@ class DeepQModel(nn.Module): #inputs the current state of the board, outputs the
 class PolicyModel(nn.Module): #inputs the current state of the board, outputs the probability of making each move
     def __init__(self):
         super(PolicyModel, self).__init__()
-        self.l1 = nn.Linear(9,100)
-        self.a1 = nn.ReLU
-        self.l2 = nn.Linear(100,100)
-        self.a2 = nn.ReLU
-        self.lo = nn.Linear(100,9)
-        self.ao = nn.Softmax()
+        self.l1 = nn.Linear(9,100, dtype=float)
+        self.a1 = nn.ReLU()
+        self.l2 = nn.Linear(100,100, dtype=float)
+        self.a2 = nn.ReLU()
+        self.lo = nn.Linear(100,9, dtype=float)
+        self.ao = nn.Softmax(dim=0)
     
     def forward(self, mat3x3: torch.Tensor) -> torch.Tensor:
         x = torch.clone(mat3x3.flatten())

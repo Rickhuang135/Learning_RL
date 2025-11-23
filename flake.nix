@@ -23,7 +23,7 @@
           with ps; [
           ]);
       in {
-        devShell = pkgs.mkShell {
+        devShell = pkgs.mkShell rec {
           buildInputs = with pkgs; [
             uv
             glib
@@ -32,7 +32,7 @@
             stdenv.cc.cc.lib
             libsForQt5.wrapQtAppsHook
             ninja
-	    cudatoolkit
+	          cudatoolkit
             python313Packages.pandas
             (python313Packages.matplotlib.override {
               enableQt = true;
@@ -49,8 +49,26 @@
           # UV_PYTHON = "${pythonEnv}/bin/python";
           UV_PYTHON_PREFERENCE = "only-system";
           shellHook = ''
-            export PYTHONWARNINGS="ignore"
-	    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${pkgs.linuxPackages.nvidia_x11}/lib:${pkgs.cudatoolkit}/lib
+              export CUDA_PATH=${pkgs.cudatoolkit}
+
+              # Set CC to GCC 13 to avoid the version mismatch error
+              export CC=${pkgs.gcc13}/bin/gcc
+              export CXX=${pkgs.gcc13}/bin/g++
+              export PATH=${pkgs.gcc13}/bin:$PATH
+
+              # Add necessary paths for dynamic linking
+              export LD_LIBRARY_PATH=${
+                pkgs.lib.makeLibraryPath ([
+                  "/run/opengl-driver" # Needed to find libGL.so
+                ] ++ buildInputs)
+              }:$LD_LIBRARY_PATH
+
+              # Set LIBRARY_PATH to help the linker find the CUDA static libraries
+              export LIBRARY_PATH=${
+                pkgs.lib.makeLibraryPath [
+                  pkgs.cudatoolkit
+                ]
+              }:$LIBRARY_PATH
           '';
         };
       }
