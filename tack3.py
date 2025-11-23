@@ -6,14 +6,31 @@ import numpy as np
 from tack_board import *
 from tack_nn import DeepQModel
 from tack_nn import PolicyModel
+from tack_ultils import pt
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 torch.set_printoptions(sci_mode=False)
 np.set_printoptions(precision = 3)
 
-def pt(matflat: torch.Tensor):
-    mat3x3=matflat.reshape(3,3)
-    print(mat3x3.detach().cpu().numpy())
+class EpisodeData:
+    def __init__(self):
+        self.Pi_loss =0
+        self.Q_loss = 0
+        self.total_rp = 0
+        self.total_ro = 0
+    
+    def flip(self):
+        self.total_rp, self.total_ro = self.total_ro, self.total_rp
+
+    def r_both(self, value):
+        self.total_rp+=value
+        self.total_ro+=value
+
+    def __repr__(self):
+        return f"Pi_loss: {self.Pi_loss:.3f} \t Q_loss: {self.Q_loss:.3f} \t total_rewards: {self.total_rp:>3}, {self.total_ro:>5}"
+
+    def __str__(self):
+        return self.__repr__()
 
 class Agent:
     def __init__(self, id: int, Q: DeepQModel, Pi:PolicyModel):
@@ -54,43 +71,14 @@ class Train:
 
         self.verbose = False
 
-    def backprop(self, Q: DeepQModel, Pi: PolicyModel, s: Board, AM: torch.Tensor, Pi0: torch.Tensor, value, Qa0):
-        Q.train()
-        states= s.generate_symmetries()
-        AMs=generate_symmetries(AM)
-        lossPi= lossQ =0
-        for state, position in zip(states,AMs):
-            position = position.flatten()
-            lossQ+= self.Q_backprop(Q,state,position,value)
-            lossPi+=self.Pi_backprop(Pi, s, position, Pi0, Qa0-value)
-        return  lossQ, lossPi
+            # print(f"\n\nInstance of Q_backprop\n")
+            # print(f"s: \n{s}")
+            # print("Qa")
+            # pt(Qa)
+            # print(f"label:")
+            # pt(label)
+            # print(f"loss: {loss}")
 
-    def Q_backprop(self, Q: DeepQModel, s: Board, AM: torch.Tensor, value):
-        self.optimiserQ.zero_grad()
-        Qa = Q(s.state)
-        label = torch.clone(Qa)
-        label[AM!=0]=value
-        loss= self.criterionQ(Qa, label)
-        loss.backward()
-        self.optimiserQ.step()
-        if self.verbose:
-            print(f"\n\nInstance of Q_backprop\n")
-            print(f"s: \n{s}")
-            print("Qa")
-            pt(Qa)
-            print(f"label:")
-            pt(label)
-            print(f"loss: {loss}")
-        return loss.item()
-
-    def Pi_backprop(self, Pi: PolicyModel, s: Board, AM: torch.Tensor, Pi0:torch.Tensor, Psi):
-        self.optimiserPi.zero_grad()
-        Pis = Pi(s.state)
-        label = torch.clone(Pi0)
-        label[AM!=0]+=Psi*self.Psi_discount
-        loss = self.criterionPi(Pis, Pi0)
-        loss.backward()
-        self.optimiserPi.step()
         # if self.verbose:
         #     print("\n\nInstance of Pi_backprop\n")
         #     print(f"s: \n{s}")  
@@ -104,13 +92,59 @@ class Train:
         #     print("label")
         #     pt(label)
         #     print(f"loss: {loss}")
-        return loss.item()
+    
+    def backprop_with_symmetries(self, Q: DeepQModel, Pi: PolicyModel, s0: Board, AM0: torch.Tensor, real_reward, epsiode_loss: EpisodeData | None = None, s2: Board | None = None):
+        Q.train()
+        Pi.train()
+        s0_s = s0.generate_symmetries()
+        AM0_s = generate_symmetries(AM0)
+        AM0_s = [ AM.flatten() for AM in AM0_s]
+        if s2 is not None:
+            s2_s = s2.generate_symmetries()
+        total_Pi_loss =0
+        total_Q_loss =0
+        for index, (s0, AM0) in enumerate(zip(s0_s, AM0_s)):
+            # update Q
+            if s2 is not None:
+                Q.eval()
+                Pi.eval()
+                with torch.no_grad():
+                    Pis2 = Pi(s2_s[index].state) # type:ignore
+                    Qs2 = Q(s2[index].state) # type:ignore
+                Q.train()
+                Pi.train()
+                expected_Qs2 = torch.sum(Pis2* Qs2)
+                value = real_reward + self.gamma*expected_Qs2
+            else:
+                value = real_reward
+            self.optimiserQ.zero_grad()
+            Qs0 = Q(s0.state)
+            Qlabel = torch.clone(Qs0)
+            Qlabel[AM0==1] = value
+            Qloss = self.criterionQ(Qs0, Qlabel)
+            Qloss.backward()
+            self.optimiserPi.step()
+            total_Q_loss += Qloss
+            
+            # update Pi with Psi
+            Qs0 = Qs0.detach()
+            self.optimiserPi.zero_grad()
+            Pis0 = Pi(s0.state)
+            V0 = torch.sum(Qs0 * Pis0)
+            Psi = Qs0[AM0 == 1] - V0
+            Pilabel = torch.clone(Pis0)
+            Pilabel[AM0==1] += Psi*self.Psi_discount
+            Piloss =self.criterionPi(Pis0, Pilabel)
+            Piloss.backward()
+            self.optimiserPi.step()
+            total_Pi_loss+=Piloss.item()
+
+        if epsiode_loss is not None:
+            epsiode_loss.Pi_loss+=total_Pi_loss
+            epsiode_loss.Q_loss+=total_Q_loss
 
     def episode(self):
-        Q_loss = 0.0
-        Pi_loss = 0.0
-        tr_p = 0 # total reward for player
-        tr_o = 0 # total reward for other
+        loss = EpisodeData()
 
         s0 = Board()
         player = self.a1
@@ -122,65 +156,40 @@ class Train:
             AM1, Pi1 = opp.infer(s1)
             s2 = s1.next(AM1)
             player.Q.eval()
-            Qa0 = player.Q(s0.state)[AM0.flatten()==1]
             if s2.end: # board ends
                 if s2.winner == 0: # draw
-                    tr_p += self.r_draw
-                    tr_o += self.r_draw
-                    tmp=self.backprop(player.Q, player.Pi, s0, AM0, Pi0, self.r_draw,Qa0)
-                    Q_loss += tmp[0]
-                    Pi_loss += tmp[1]
-                    tmp=self.backprop(opp.Q,opp.Pi, s1,  AM1, Pi1,self.r_draw, Qa0)
-                    Q_loss += tmp[0]
-                    Pi_loss += tmp[1]
+                    loss.r_both(self.r_draw)
+                    self.backprop_with_symmetries(player.Q, player.Pi, s0, AM0, self.r_draw, loss)
+                    self.backprop_with_symmetries(opp.Q,opp.Pi, s1,  AM1, self.r_draw, loss)
                 else:
-                    tr_p += self.r_lose
-                    tr_o += self.r_win
-                    tmp=self.backprop(player.Q, player.Pi, s0, AM0, Pi0,self.r_lose, Qa0)
-                    Q_loss += tmp[0]
-                    Pi_loss += tmp[1]
-                    tmp=self.backprop(opp.Q,opp.Pi, s1, AM1, Pi1,self.r_win,Qa0)
-                    Q_loss += tmp[0]
-                    Pi_loss += tmp[1]
+                    loss.total_rp += self.r_lose
+                    loss.total_ro += self.r_win
+                    self.backprop_with_symmetries(player.Q, player.Pi, s0, AM0, self.r_lose, loss)
+                    self.backprop_with_symmetries(opp.Q,opp.Pi, s1, AM1,self.r_win, loss)
             else:
-                s2s = s2.generate_symmetries()
-                s0s = s0.generate_symmetries()
-                Pi0s = generate_symmetries(Pi0.reshape(3,3))
-                Pi2s = [player.infer(s)[1] for s in s2s]
-                Qa2s = [player.Q(s.state).detach() for s in s2s]
-                AM0s = generate_symmetries(AM0)
-                tr_p += self.r_move
-                player.Q.train()
-                player.Pi.train()
-                for Qa2, AM, s, Pi2, Pi0 in zip(Qa2s, AM0s, s0s, Pi2s, Pi0s):
-                    AM=AM.flatten()
-                    Pi0=Pi0.flatten()
-                    expected_Q2=torch.sum(Qa2*Pi2)
-                    Psi = Qa0 - expected_Q2
-                    Pi_loss += self.Pi_backprop(player.Pi, s, AM, Pi0, Psi)
-                    Q_loss+=self.Q_backprop(player.Q, s, AM, self.r_move+self.gamma*expected_Q2) # using expected SARSA
+                self.backprop_with_symmetries(self.Q,self.Pi, s0, AM0, self.r_move, loss)
+                loss.total_rp+= self.r_move
                 del AM0, Pi0
                 AM0, Pi0 = AM1, Pi1
                 # player, opp = opp, player
-                tr_p,tr_o = tr_o, tr_p
+                loss.flip()
             
             del AM1, s0, Pi1
             s0 = s1
             s1 = s2
         del s1, AM0
-        return Pi_loss, Q_loss, (tr_p, tr_o)
-    
+        return loss
     
 def train_loop(
-        episodes = 10,
+        episodes = 500,
 ):
     
     train = Train()
 
     for i in range(episodes):
-        Pi_loss, Q_loss, (tr_1, tr_2) = train.episode()
+        loss = train.episode()
         if i % 7 == 0:
-            print(f"{round(i/episodes*100)}% Pi_loss: {Pi_loss:.3f} \t Q_loss: {Q_loss:.3f} \t total_rewards: {tr_1:>3}, {tr_2:>5}")
+            print(f"{round(i/episodes*100)}% {loss}")
         if episodes-i <= 2:
             train.verbose=True
     return train

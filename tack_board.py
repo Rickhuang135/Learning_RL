@@ -2,6 +2,7 @@ import torch
 import numpy as np
 
 from random import random
+from tack_ultils import generate_symmetries
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 class Board:
@@ -88,12 +89,3 @@ def play(Agent,init_board=None,player_turn=False):
             AM = Agent(board)
         board.write(AM)
         return play(Agent, board, not player_turn)
-
-def generate_symmetries(mat3x3: torch.Tensor) -> list[torch.Tensor]:
-    results = []
-    results.append(torch.clone(mat3x3))
-    results.append(torch.flip(mat3x3,[1,0]))
-    results.append(torch.fliplr(mat3x3))
-    results.append(torch.flipud(mat3x3))
-    results.append(torch.transpose(mat3x3,1,0))
-    return results
