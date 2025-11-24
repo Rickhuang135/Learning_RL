@@ -25,9 +25,9 @@ class PolicyModel(nn.Module): #inputs the current state of the board, outputs th
     def __init__(self):
         super(PolicyModel, self).__init__()
         self.l1 = nn.Linear(9,100, dtype=float)
-        self.a1 = nn.ReLU()
+        self.a1 = nn.LeakyReLU()
         self.l2 = nn.Linear(100,100, dtype=float)
-        self.a2 = nn.ReLU()
+        self.a2 = nn.Softplus()
         self.lo = nn.Linear(100,9, dtype=float)
         self.ao = nn.Softmax(dim=0)
     
@@ -35,5 +35,8 @@ class PolicyModel(nn.Module): #inputs the current state of the board, outputs th
         x = torch.clone(mat3x3.flatten())
         x = self.a1(self.l1(x))
         x = self.a2(self.l2(x))
-        x = self.ao(self.lo(x))
+        x = self.lo(x)
+        # print(x)
+        x = self.ao(x)
+        # x = self.ao(self.lo(x))
         return x

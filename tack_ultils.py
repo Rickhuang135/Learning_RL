@@ -1,6 +1,5 @@
 import torch
 
-
 def generate_symmetries(mat3x3: torch.Tensor) -> list[torch.Tensor]:
     results = []
     results.append(torch.clone(mat3x3))
@@ -12,4 +11,4 @@ def generate_symmetries(mat3x3: torch.Tensor) -> list[torch.Tensor]:
 
 def pt(matflat: torch.Tensor):
     mat3x3=matflat.reshape(3,3)
-    print(mat3x3.detach().cpu().numpy())
+    print(torch.round(mat3x3.detach().cpu(), decimals=3).numpy())

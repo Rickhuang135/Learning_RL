@@ -10,6 +10,7 @@ from tack_ultils import pt
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 torch.set_printoptions(sci_mode=False)
+torch.set_printoptions(precision= 3)
 np.set_printoptions(precision = 3)
 
 class EpisodeData:
@@ -63,35 +64,13 @@ class Train:
         self.r_move = 1
 
         self.gamma = 0.8
-        self.Psi_discount = 0.01
+        self.Psi_discount = 0.05
         self.criterionQ = nn.MSELoss()
         self.optimiserQ = optim.Adam(self.Q.parameters(),lr=0.0005)
         self.criterionPi = nn.CrossEntropyLoss()
-        self.optimiserPi = optim.Adam(self.Pi.parameters(),lr=0.001)
+        self.optimiserPi = optim.SGD(self.Pi.parameters(),lr=0.0005)
 
         self.verbose = False
-
-            # print(f"\n\nInstance of Q_backprop\n")
-            # print(f"s: \n{s}")
-            # print("Qa")
-            # pt(Qa)
-            # print(f"label:")
-            # pt(label)
-            # print(f"loss: {loss}")
-
-        # if self.verbose:
-        #     print("\n\nInstance of Pi_backprop\n")
-        #     print(f"s: \n{s}")  
-        #     print("Pis")
-        #     pt(Pis)
-        #     print("AM")
-        #     pt(AM)
-        #     print("raw_label")
-        #     pt(Pi0)
-        #     print(f"Psi: \n{Psi.cpu().item()}")
-        #     print("label")
-        #     pt(label)
-        #     print(f"loss: {loss}")
     
     def backprop_with_symmetries(self, Q: DeepQModel, Pi: PolicyModel, s0: Board, AM0: torch.Tensor, real_reward, epsiode_loss: EpisodeData | None = None, s2: Board | None = None):
         Q.train()
@@ -123,21 +102,47 @@ class Train:
             Qlabel[AM0==1] = value
             Qloss = self.criterionQ(Qs0, Qlabel)
             Qloss.backward()
-            self.optimiserPi.step()
-            total_Q_loss += Qloss
+            self.optimiserQ.step()
+            total_Q_loss += Qloss.item()
             
             # update Pi with Psi
             Qs0 = Qs0.detach()
             self.optimiserPi.zero_grad()
             Pis0 = Pi(s0.state)
             V0 = torch.sum(Qs0 * Pis0)
-            Psi = Qs0[AM0 == 1] - V0
+            Psi =  V0 - Qs0[AM0 == 1]  # Qs0 smaller means move is good
             Pilabel = torch.clone(Pis0)
             Pilabel[AM0==1] += Psi*self.Psi_discount
             Piloss =self.criterionPi(Pis0, Pilabel)
             Piloss.backward()
             self.optimiserPi.step()
             total_Pi_loss+=Piloss.item()
+
+            if index==0 and self.verbose:
+            # if self.verbose:
+                # Q information
+                print(f"\n\nInstance of Q_backprop\n")
+                print(f"board: \n{s0}")
+                print("Qs0: action values at state 0")
+                pt(Qs0)
+                print("move")
+                pt(AM0)
+                print(f"Q label:")
+                pt(Qlabel)
+                print(f"loss: {Qloss.cpu().item()}")
+
+                # Pi information
+                print("\nInstance of Pi_backprop\n")
+                print(f"board: \n{s0}")  
+                print("Policy at state 0")
+                pt(Pis0)
+                print("move")
+                pt(AM0)
+                print(f"V: \n{V0.cpu().item()}")
+                print(f"Psi: \n{Psi.cpu().item()}")
+                print("Pi label")
+                pt(Pilabel)
+                print(f"loss: {Piloss.cpu().item()}")
 
         if epsiode_loss is not None:
             epsiode_loss.Pi_loss+=total_Pi_loss
@@ -181,21 +186,20 @@ class Train:
         return loss
     
 def train_loop(
-        episodes = 500,
-):
-    
+        episodes = 200,
+):  
     train = Train()
 
     for i in range(episodes):
+        if episodes-i <= 1:
+            train.verbose=True
         loss = train.episode()
         if i % 7 == 0:
             print(f"{round(i/episodes*100)}% {loss}")
-        if episodes-i <= 2:
-            train.verbose=True
     return train
 
 a1=train_loop().a1
-play(lambda board: a1.infer(board)[0])
+# play(lambda board: a1.infer(board)[0])
 
 
 # begin
