@@ -89,7 +89,7 @@ class Train:
                 Pi.eval()
                 with torch.no_grad():
                     Pis2 = Pi(s2_s[index].state) # type:ignore
-                    Qs2 = Q(s2[index].state) # type:ignore
+                    Qs2 = Q(s2_s[index].state) # type:ignore
                 Q.train()
                 Pi.train()
                 expected_Qs2 = torch.sum(Pis2* Qs2)
@@ -172,7 +172,7 @@ class Train:
                     self.backprop_with_symmetries(player.Q, player.Pi, s0, AM0, self.r_lose, loss)
                     self.backprop_with_symmetries(opp.Q,opp.Pi, s1, AM1,self.r_win, loss)
             else:
-                self.backprop_with_symmetries(self.Q,self.Pi, s0, AM0, self.r_move, loss)
+                self.backprop_with_symmetries(self.Q,self.Pi, s0, AM0, self.r_move, loss, s2)
                 loss.total_rp+= self.r_move
                 del AM0, Pi0
                 AM0, Pi0 = AM1, Pi1
