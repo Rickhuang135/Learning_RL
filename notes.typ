@@ -131,7 +131,7 @@ $ nabla_theta J(pi_theta) = E[sum_(t=0)^infinity nabla_theta log pi_theta (a_t|s
 
 where:
 - $nabla_theta log pi_theta (a_t | s_t)$ represents how to increases the probability of action $a$. In softmax, this can be achieved by adjusting the probablity of a single action.
-- $Psi_t$ describes how good an action $a$ is, often represented by $Q_pi (s_t,a_t) - V_pi (s_t)$ in an actor-critic model
+- $Psi_t$ describes how good an action $a$ is, often represented by $Q_pi (s_t,a_t) - V_pi (s_t)$ aka the advantage function, $A$, in an actor-critic model
 - $E$ averages across all states and actions
 
 == Surrogate objective functions

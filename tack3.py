@@ -7,6 +7,7 @@ from tack_board import *
 from tack_nn import DeepQModel
 from tack_nn import PolicyModel
 from tack_ultils import pt
+from tack_ultils import normalise_Pi
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 torch.set_printoptions(sci_mode=False)
@@ -43,8 +44,7 @@ class Agent:
         self.Pi.eval()
         with torch.no_grad():
             raw_dist: torch.Tensor = self.Pi(board.state)
-            raw_dist[(board.legal_moves.flatten()==0)]=0
-            legal_dist = raw_dist/torch.sum(raw_dist)
+            legal_dist = normalise_Pi(raw_dist, board.legal_moves.flatten())
             cum_dist = legal_dist.cumsum(0)
             idx = torch.searchsorted(cum_dist, torch.rand(1).to(device)).to(device)
             AM: torch.Tensor = torch.zeros(9).to(device)
@@ -64,7 +64,7 @@ class Train:
         self.r_move = 1
 
         self.gamma = 0.8
-        self.Psi_discount = 0.05
+        self.Psi_discount = 0.8
         self.criterionQ = nn.MSELoss()
         self.optimiserQ = optim.Adam(self.Q.parameters(),lr=0.0005)
         self.criterionPi = nn.CrossEntropyLoss()
@@ -92,7 +92,9 @@ class Train:
                     Qs2 = Q(s2_s[index].state) # type:ignore
                 Q.train()
                 Pi.train()
-                expected_Qs2 = torch.sum(Pis2* Qs2)
+                # expected_Qs2 = torch.sum(Pis2* Qs2)
+                Qs2[s2.legal_moves.flatten()!=1] +=100 
+                expected_Qs2 = torch.min(Qs2)
                 value = real_reward + self.gamma*expected_Qs2
             else:
                 value = real_reward
@@ -107,12 +109,17 @@ class Train:
             
             # update Pi with Psi
             Qs0 = Qs0.detach()
+            Qlabel = Qlabel.detach()
             self.optimiserPi.zero_grad()
             Pis0 = Pi(s0.state)
-            V0 = torch.sum(Qs0 * Pis0)
-            Psi =  V0 - Qs0[AM0 == 1]  # Qs0 smaller means move is good
+            Pi_normal = normalise_Pi(Pis0, s0.legal_moves.flatten())
+            Pis0 = Pi_normal
+            # V0 = torch.sum(Qlabel * Pi_normal)
+            V0 = torch.max(Qlabel)
+            Psi =  V0 - Qlabel[AM0 == 1]  # Qs0 smaller means move is good
             Pilabel = torch.clone(Pis0)
-            Pilabel[AM0==1] += Psi*self.Psi_discount
+            Pilabel[AM0==1] += Pilabel[AM0==1]*Psi*self.Psi_discount
+            # Pilabel[s0.legal_moves.flatten()!=1]=0
             Piloss =self.criterionPi(Pis0, Pilabel)
             Piloss.backward()
             self.optimiserPi.step()
@@ -125,6 +132,11 @@ class Train:
                 print(f"board: \n{s0}")
                 print("Qs0: action values at state 0")
                 pt(Qs0)
+                if s2 is not None:
+                    print(f"board s2: \n{s2}")
+                    print("Qs2: action values at state 2")
+                    pt(Qs2) # type: ignore
+                    print(f"expected_Qs2 {expected_Qs2}") # type: ignore
                 print("move")
                 pt(AM0)
                 print(f"Q label:")
@@ -135,7 +147,8 @@ class Train:
                 print("\nInstance of Pi_backprop\n")
                 print(f"board: \n{s0}")  
                 print("Policy at state 0")
-                pt(Pis0)
+                # pt(Pis0)
+                pt(Pi_normal)
                 print("move")
                 pt(AM0)
                 print(f"V: \n{V0.cpu().item()}")
@@ -186,7 +199,7 @@ class Train:
         return loss
     
 def train_loop(
-        episodes = 200,
+        episodes = 100,
 ):  
     train = Train()
 
@@ -194,7 +207,7 @@ def train_loop(
         if episodes-i <= 1:
             train.verbose=True
         loss = train.episode()
-        if i % 7 == 0:
+        if i % 5 == 0:
             print(f"{round(i/episodes*100)}% {loss}")
     return train
 
