@@ -1,4 +1,5 @@
 import torch
+from device import device
 
 def generate_symmetries(mat3x3: torch.Tensor) -> list[torch.Tensor]:
     results = []
@@ -10,10 +11,14 @@ def generate_symmetries(mat3x3: torch.Tensor) -> list[torch.Tensor]:
     return results
 
 def pt(matflat: torch.Tensor):
-    mat3x3=matflat.reshape(3,3)
+    if len(matflat) == 9:
+        mat3x3= matflat.reshape(3,3)
+    else:
+        mat3x3 = matflat
     print(torch.round(mat3x3.detach().cpu(), decimals=3).numpy())
 
-def normalise_Pi(flat_raw_dist: torch.Tensor, legal_moves_flat: torch.Tensor):
-    raw_dist = torch.clone(flat_raw_dist)
-    raw_dist[legal_moves_flat!=1] = 0
-    return raw_dist/torch.sum(raw_dist)
+def coords_to_AM(xy: tuple):
+    x, y = xy
+    AM = torch.zeros((3,3)).to(device)
+    AM[x,y] = 1
+    return AM

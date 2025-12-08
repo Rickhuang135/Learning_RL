@@ -1,8 +1,7 @@
 from tack_board import *
 import torch
+from device import device
 
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-states_explored = 0
 class P:
     def __init__(self, value=None, depth=0):
         self.action:list = []
@@ -22,6 +21,7 @@ class P:
 
 def prune(
         s: Board, 
+        id = 1,
         min_node=True, 
         alpha=-100, # maximum achievable value
         beta=100, # minimum achievable value
@@ -46,13 +46,13 @@ def prune(
         for index,m in enumerate(legal):
             if m:
                 AM = torch.zeros(9).to(device)
-                AM[index]=1
+                AM[index]=id
                 sn = s.next(AM.reshape(3,3))
                 if min_node: # beta is local value, alpha is upstream value
-                    res = prune(sn, False, alpha, beta, depth+1)
+                    res = prune(sn, id*-1, False, alpha, beta, depth+1)
                     beta = min(res.value,beta)
                 else: # is max_node, alpha is local value, beta is upstream value
-                    res = prune(sn, True, alpha, beta, depth+1)
+                    res = prune(sn, id*-1, True, alpha, beta, depth+1)
                     alpha = max(res.value,alpha)
                 node.append(AM, res)
                 if beta<=alpha: # prune when, case min-node: upstream value is greator than current
@@ -63,10 +63,15 @@ def prune(
             node.value=alpha
         return node
 
-def infer(s: Board):
-    p=prune(s)
+def infer(s: Board, id=1):
+    p=prune(s, id=id)
     child_values = [c.value for c in p.children]
     print(child_values)
     return p.action[child_values.index(min(child_values))].reshape(3,3)
+
+def value(s: Board):
+    p=prune(s)
+    child_values = [c.value for c in p.children]
+    return min(child_values)
 
 play(infer)

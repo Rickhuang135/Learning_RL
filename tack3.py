@@ -4,12 +4,12 @@ import torch.optim as optim
 import numpy as np
 
 from tack_board import *
-from tack_nn import DeepQModel
+from tack_nn import ValueModel
 from tack_nn import PolicyModel
 from tack_ultils import pt
-from tack_ultils import normalise_Pi
+from device import device
+from tack_abprune import infer
 
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 torch.set_printoptions(sci_mode=False)
 torch.set_printoptions(precision= 3)
 np.set_printoptions(precision = 3)
@@ -17,7 +17,7 @@ np.set_printoptions(precision = 3)
 class EpisodeData:
     def __init__(self):
         self.Pi_loss =0
-        self.Q_loss = 0
+        self.V_loss = 0
         self.total_rp = 0
         self.total_ro = 0
     
@@ -29,177 +29,162 @@ class EpisodeData:
         self.total_ro+=value
 
     def __repr__(self):
-        return f"Pi_loss: {self.Pi_loss:.3f} \t Q_loss: {self.Q_loss:.3f} \t total_rewards: {self.total_rp:>3}, {self.total_ro:>5}"
+        return f"Pi_loss: {self.Pi_loss:.3f} \t V_loss: {self.V_loss:.3f} \t total_rewards: {self.total_rp:>3}, {self.total_ro:>5}"
 
     def __str__(self):
         return self.__repr__()
 
 class Agent:
-    def __init__(self, id: int, Q: DeepQModel, Pi:PolicyModel):
-        self.Q = Q
+    def __init__(self, id: int, Pi:PolicyModel):
         self.Pi = Pi
         self.id = id # id can not be zero
 
-    def infer(self, board: Board):
+    def __call__(self, board):
         self.Pi.eval()
         with torch.no_grad():
-            raw_dist: torch.Tensor = self.Pi(board.state)
-            legal_dist = normalise_Pi(raw_dist, board.legal_moves.flatten())
-            cum_dist = legal_dist.cumsum(0)
+            raw_output = self.Pi(board)
+            # pt(raw_output)
+            prob: torch.Tensor = torch.nn.functional.softmax(raw_output, dim=0)
+            cum_dist = prob.cumsum(0)
             idx = torch.searchsorted(cum_dist, torch.rand(1).to(device)).to(device)
             AM: torch.Tensor = torch.zeros(9).to(device)
             AM[idx]=1
-            return AM.reshape((3,3)), legal_dist
+            return AM.reshape((3,3))*self.id
                 
 class Train:
     def __init__(self):
-        self.Q = DeepQModel().to(device)
+        self.V = ValueModel().to(device)
         self.Pi = PolicyModel().to(device)
-        self.a1 = Agent(1, self.Q, self.Pi)
-        # self.a2 = Agent(1, self.Q, self.Pi)
+        self.a1 = Agent(1, self.Pi)
+        # self.a2 = Agent(-1, self.V, self.Pi)
+        self.a2 = lambda x: infer(x)*-1
 
-        self.r_win = 0
-        self.r_lose = 20
-        self.r_draw = 1
-        self.r_move = 1
+        self.r_win = 1
+        self.r_draw = 0
 
-        self.gamma = 0.8
-        self.Psi_discount = 0.8
-        self.criterionQ = nn.MSELoss()
-        self.optimiserQ = optim.Adam(self.Q.parameters(),lr=0.0005)
-        self.criterionPi = nn.CrossEntropyLoss()
-        self.optimiserPi = optim.SGD(self.Pi.parameters(),lr=0.0005)
+        self.gamma = 0.9
+        self.Psi_discount = 0.01
+        self.criterionV = nn.MSELoss()
+        self.optimiserV = optim.Adam(self.V.parameters(),lr=0.005)
+        # self.criterionPi = nn.CrossEntropyLoss()
+        # self.criterionPi = nn.MSELoss()
+        self.optimiserPi = optim.Adam(self.Pi.parameters(),lr=0.0005)
 
         self.verbose = False
     
-    def backprop_with_symmetries(self, Q: DeepQModel, Pi: PolicyModel, s0: Board, AM0: torch.Tensor, real_reward, epsiode_loss: EpisodeData | None = None, s2: Board | None = None):
-        Q.train()
+    def backprop_with_symmetries(self, V: ValueModel, Pi: PolicyModel, s0: Board, s1: Board, AM0: torch.Tensor, epsiode_loss: EpisodeData | None = None):
+        V.train()
         Pi.train()
         s0_s = s0.generate_symmetries()
         AM0_s = generate_symmetries(AM0)
         AM0_s = [ AM.flatten() for AM in AM0_s]
-        if s2 is not None:
-            s2_s = s2.generate_symmetries()
+        s1_s = s1.generate_symmetries()
         total_Pi_loss =0
-        total_Q_loss =0
-        for index, (s0, AM0) in enumerate(zip(s0_s, AM0_s)):
-            # update Q
-            if s2 is not None:
-                Q.eval()
-                Pi.eval()
-                with torch.no_grad():
-                    Pis2 = Pi(s2_s[index].state) # type:ignore
-                    Qs2 = Q(s2_s[index].state) # type:ignore
-                Q.train()
-                Pi.train()
-                # expected_Qs2 = torch.sum(Pis2* Qs2)
-                Qs2[s2.legal_moves.flatten()!=1] +=100 
-                expected_Qs2 = torch.min(Qs2)
-                value = real_reward + self.gamma*expected_Qs2
+        total_V_loss =0
+        for index, (s0, s1, AM0) in enumerate(zip(s0_s, s1_s, AM0_s)):
+            # update V
+            if s1.end:
+                Vs1 = s1.winner * (self.r_win - s1.depth*0.01) * torch.ones(1, dtype=torch.double).to(device)
             else:
-                value = real_reward
-            self.optimiserQ.zero_grad()
-            Qs0 = Q(s0.state)
-            Qlabel = torch.clone(Qs0)
-            Qlabel[AM0==1] = value
-            Qloss = self.criterionQ(Qs0, Qlabel)
-            Qloss.backward()
-            self.optimiserQ.step()
-            total_Q_loss += Qloss.item()
+                Vs1 = V(s1.state).detach()
+            self.optimiserV.zero_grad()
+            Vs0 = V(s0.state)
+            Vlabel = Vs1*self.gamma
+            Vloss = self.criterionV(Vs0, Vlabel)
+            Vloss.backward()
+            self.optimiserV.step()
+            total_V_loss += Vloss.item()
             
-            # update Pi with Psi
-            Qs0 = Qs0.detach()
-            Qlabel = Qlabel.detach()
+            # update Pi with Advantage function
+            A = (Vs1 * self.gamma - Vs0.detach())*AM0[AM0!=0]
             self.optimiserPi.zero_grad()
-            Pis0 = Pi(s0.state)
-            Pi_normal = normalise_Pi(Pis0, s0.legal_moves.flatten())
-            Pis0 = Pi_normal
-            # V0 = torch.sum(Qlabel * Pi_normal)
-            V0 = torch.max(Qlabel)
-            Psi =  V0 - Qlabel[AM0 == 1]  # Qs0 smaller means move is good
-            Pilabel = torch.clone(Pis0)
-            Pilabel[AM0==1] += Pilabel[AM0==1]*Psi*self.Psi_discount
-            # Pilabel[s0.legal_moves.flatten()!=1]=0
-            Piloss =self.criterionPi(Pis0, Pilabel)
-            Piloss.backward()
-            self.optimiserPi.step()
-            total_Pi_loss+=Piloss.item()
+            logits = Pi(s0)
+            log_prob = torch.nn.functional.log_softmax(logits, dim=0)
+            Piloss = -1*log_prob[AM0!=0]*A
 
+            prob = torch.nn.functional.softmax(logits, dim=0)
+            # entropy = -prob*log_prob.mean()
+            # loss_entropy = -1 * entropy * self.Psi_discount
+
+            # Piloss.backward(retain_graph = True)
+            Piloss.backward()
+            # loss_entropy.sum().backward()
+
+            self.optimiserPi.step()
+            torch.nn.utils.clip_grad_norm_(Pi.parameters(),0.1)
+            total_Pi_loss+=Piloss.item()
             if index==0 and self.verbose:
-            # if self.verbose:
-                # Q information
-                print(f"\n\nInstance of Q_backprop\n")
+                # V information
+                print(f"\n\nInstance of V_backprop\n")
                 print(f"board: \n{s0}")
-                print("Qs0: action values at state 0")
-                pt(Qs0)
-                if s2 is not None:
-                    print(f"board s2: \n{s2}")
-                    print("Qs2: action values at state 2")
-                    pt(Qs2) # type: ignore
-                    print(f"expected_Qs2 {expected_Qs2}") # type: ignore
+                print("Vs0: Value at state 0")
+                pt(Vs0)
                 print("move")
                 pt(AM0)
-                print(f"Q label:")
-                pt(Qlabel)
-                print(f"loss: {Qloss.cpu().item()}")
+                print("Vs1: Value at state 1")
+                pt(Vs1)
+                print("Vlabel")
+                pt(Vlabel)
+                print(f"loss: {Vloss.cpu().item()}")
 
                 # Pi information
                 print("\nInstance of Pi_backprop\n")
-                print(f"board: \n{s0}")  
-                print("Policy at state 0")
-                # pt(Pis0)
-                pt(Pi_normal)
+                print(f"board: \n{s0}")
+                print("Policy")
+                pt(prob)
+                print("Log prob")
+                pt(log_prob)
                 print("move")
                 pt(AM0)
-                print(f"V: \n{V0.cpu().item()}")
-                print(f"Psi: \n{Psi.cpu().item()}")
-                print("Pi label")
-                pt(Pilabel)
-                print(f"loss: {Piloss.cpu().item()}")
+                print("advantage")
+                pt(A)
+                print("Piloss:")
+                pt(Piloss)
+                # print("Entropy")
+                # pt(entropy)
+                # print("Entropy loss")
+                # pt(loss_entropy)
 
+                Pi.eval()
+                logits = Pi(s0)
+                log_prob = torch.nn.functional.log_softmax(logits, dim=0)
+                prob = torch.nn.functional.softmax(logits, dim=0)
+                entropy = -prob*log_prob.mean()
+                print("Policy")
+                pt(prob)
+                print("Log prob")
+                pt(log_prob)
+                # print("Entropy")
+                # pt(entropy)
+                # Pi.train()
+
+            break
         if epsiode_loss is not None:
             epsiode_loss.Pi_loss+=total_Pi_loss
-            epsiode_loss.Q_loss+=total_Q_loss
+            epsiode_loss.V_loss+=total_V_loss
 
     def episode(self):
         loss = EpisodeData()
 
         s0 = Board()
+        s0.write(torch.Tensor([
+    [1,-1,0],
+    [0,-1,0],
+    [0,1,0],
+    ]))
         player = self.a1
-        opp = player
-        # opp = self.a2
-        AM0, Pi0 = player.infer(s0)
-        s1= s0.next(AM0)
-        while not s1.end:
-            AM1, Pi1 = opp.infer(s1)
-            s2 = s1.next(AM1)
-            player.Q.eval()
-            if s2.end: # board ends
-                if s2.winner == 0: # draw
-                    loss.r_both(self.r_draw)
-                    self.backprop_with_symmetries(player.Q, player.Pi, s0, AM0, self.r_draw, loss)
-                    self.backprop_with_symmetries(opp.Q,opp.Pi, s1,  AM1, self.r_draw, loss)
-                else:
-                    loss.total_rp += self.r_lose
-                    loss.total_ro += self.r_win
-                    self.backprop_with_symmetries(player.Q, player.Pi, s0, AM0, self.r_lose, loss)
-                    self.backprop_with_symmetries(opp.Q,opp.Pi, s1, AM1,self.r_win, loss)
-            else:
-                self.backprop_with_symmetries(self.Q,self.Pi, s0, AM0, self.r_move, loss, s2)
-                loss.total_rp+= self.r_move
-                del AM0, Pi0
-                AM0, Pi0 = AM1, Pi1
-                # player, opp = opp, player
-                loss.flip()
-            
-            del AM1, s0, Pi1
+        opp = self.a2
+        while not s0.end:
+            AM0 = player(s0)
+            s1= s0.next(AM0)
+            self.backprop_with_symmetries(self.V,self.Pi, s0, s1,AM0, loss)
+            player, opp = opp, player
+            del AM0, s0
             s0 = s1
-            s1 = s2
-        del s1, AM0
         return loss
     
 def train_loop(
-        episodes = 100,
+        episodes = 5,
 ):  
     train = Train()
 
@@ -215,25 +200,18 @@ a1=train_loop().a1
 # play(lambda board: a1.infer(board)[0])
 
 
-# begin
-# make actual move at s0 using Pi0, creating s1
-
-# while not end:
-# opponent makes theoretical move at s1 using Pi1, creating s2
-#     if board ends with draw, 
-#       update Q with [draw] at s0
-#     else:
-#       [loss] at s0
-#       [win] at s1
-# inference to get Qa2 at s2
-# update Q at s0 using Qa2
-
-# s1 becomes s0, s2 becomes s1
-# Qa1 becomes Qa0, Qa2 becomes Qa1
-
-
 # components:
 # 1. Board
 # 2. Reward giving environment
-# 3. Agent which uses Qa values to make moves and update Q
-# 4. Model(s) which gives Qa values
+# 3. Agent which uses Va values to make moves and update V
+# 4. Model(s) which gives Va values
+
+# value system:
+# while not s0 end:
+    # make move at s0, creating s1
+    # if s1 is end state
+    #   update V1 with draw or win
+    # 
+    # update V0 with s0
+    # update Pi with V0
+    # s0 = s1

@@ -3,8 +3,9 @@ import numpy as np
 
 from random import random
 from tack_ultils import generate_symmetries
+from tack_ultils import coords_to_AM
+from device import device
 
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 class Board:
     def __init__(self,  init_state=None, isclone=False):
         if not isclone:
@@ -15,6 +16,7 @@ class Board:
             self.legal_moves=torch.where(self.state==0,1,0)
             self.end =False
             self.winner = 0
+            self.depth = 0
 
     def write(self, addition_matrix):
         self.state+=addition_matrix
@@ -33,7 +35,8 @@ class Board:
     def next(self, addition_matrix):
         result = self.copy()
         result.write(addition_matrix)
-        result.state*=-1
+        # result.state*=-1
+        result.depth +=1
         return result
 
     def copy(self):
@@ -41,6 +44,7 @@ class Board:
         b.state=torch.clone(self.state)
         b.legal_moves=torch.clone(self.legal_moves)
         b.end=self.end
+        b.depth = self.depth
         return b
     
     def is_end(self) -> int: # 1 for win, 0 for draw, -1 for continue
@@ -66,14 +70,22 @@ class Board:
     
     def generate_symmetries(self) -> list:
         mat3x3 = self.state
-        return [Board(init_state=mat) for mat in generate_symmetries(mat3x3)]
+        results =[Board(init_state=mat) for mat in generate_symmetries(mat3x3)]
+        for result in results: 
+            result.depth=self.depth
+            if self.end:
+                result.end = self.end
+                result.winner=self.winner
+            
+        return results
     
-def play(Agent,init_board=None,player_turn=False):
+def play(Agent,init_board=None,player_turn=False, player_id=-1):
     if init_board is None:
         board=Board()
         if random()<0.4:
             player_turn=True
-        return play(Agent, board, player_turn)
+            player_id = 1
+        return play(Agent, board, player_turn, player_id)
     else:
         board: Board = init_board
         print(board)
@@ -83,9 +95,8 @@ def play(Agent,init_board=None,player_turn=False):
         if player_turn:
             move = input("Enter move (x,y): ")
             a,b = move.split(",")
-            AM = torch.zeros((3,3)).to(device)
-            AM[int(a),int(b)] = -1
+            AM = coords_to_AM((int(a), int(b))) * player_id
         else:
-            AM = Agent(board)
+            AM = Agent(board, id=player_id*-1)
         board.write(AM)
-        return play(Agent, board, not player_turn)
+        return play(Agent, board, not player_turn, player_id)
