@@ -8,7 +8,6 @@ from tack_nn import ValueModel
 from tack_nn import PolicyModel
 from tack_ultils import pt
 from device import device
-from tack_abprune import infer
 
 torch.set_printoptions(sci_mode=False)
 torch.set_printoptions(precision= 3)
@@ -56,19 +55,17 @@ class Train:
         self.V = ValueModel().to(device)
         self.Pi = PolicyModel().to(device)
         self.a1 = Agent(1, self.Pi)
-        # self.a2 = Agent(-1, self.V, self.Pi)
-        self.a2 = lambda x: infer(x)*-1
+        self.a2 = Agent(-1, self.Pi)
+        # self.a2 = lambda x: infer(x)*-1
 
         self.r_win = 1
         self.r_draw = 0
 
         self.gamma = 0.9
-        self.Psi_discount = 0.01
+        self.Psi_discount = 0.002
         self.criterionV = nn.MSELoss()
-        self.optimiserV = optim.Adam(self.V.parameters(),lr=0.005)
-        # self.criterionPi = nn.CrossEntropyLoss()
-        # self.criterionPi = nn.MSELoss()
-        self.optimiserPi = optim.Adam(self.Pi.parameters(),lr=0.0005)
+        self.optimiserV = optim.Adam(self.V.parameters(),lr=0.0005)
+        self.optimiserPi = optim.Adam(self.Pi.parameters(),lr=0.001)
 
         self.verbose = False
     
@@ -84,7 +81,7 @@ class Train:
         for index, (s0, s1, AM0) in enumerate(zip(s0_s, s1_s, AM0_s)):
             # update V
             if s1.end:
-                Vs1 = s1.winner * (self.r_win - s1.depth*0.01) * torch.ones(1, dtype=torch.double).to(device)
+                Vs1 = s1.winner * (self.r_win - s1.depth*0.01) * torch.ones(1, dtype=torch.double).to(device) #type:ignore
             else:
                 Vs1 = V(s1.state).detach()
             self.optimiserV.zero_grad()
@@ -103,12 +100,12 @@ class Train:
             Piloss = -1*log_prob[AM0!=0]*A
 
             prob = torch.nn.functional.softmax(logits, dim=0)
-            # entropy = -prob*log_prob.mean()
-            # loss_entropy = -1 * entropy * self.Psi_discount
+            entropy = -prob*log_prob.mean()
+            loss_entropy = -1 * entropy * self.Psi_discount
 
-            # Piloss.backward(retain_graph = True)
-            Piloss.backward()
-            # loss_entropy.sum().backward()
+            Piloss.backward(retain_graph = True)
+            # Piloss.backward()
+            loss_entropy.mean().backward()
 
             self.optimiserPi.step()
             torch.nn.utils.clip_grad_norm_(Pi.parameters(),0.1)
@@ -145,15 +142,15 @@ class Train:
                 # print("Entropy loss")
                 # pt(loss_entropy)
 
-                Pi.eval()
-                logits = Pi(s0)
-                log_prob = torch.nn.functional.log_softmax(logits, dim=0)
-                prob = torch.nn.functional.softmax(logits, dim=0)
-                entropy = -prob*log_prob.mean()
-                print("Policy")
-                pt(prob)
-                print("Log prob")
-                pt(log_prob)
+                # Pi.eval()
+                # logits = Pi(s0)
+                # log_prob = torch.nn.functional.log_softmax(logits, dim=0)
+                # prob = torch.nn.functional.softmax(logits, dim=0)
+                # entropy = -prob*log_prob.mean()
+                # print("Policy")
+                # pt(prob)
+                # print("Log prob")
+                # pt(log_prob)
                 # print("Entropy")
                 # pt(entropy)
                 # Pi.train()
@@ -169,11 +166,11 @@ class Train:
         s0 = Board()
         s0.write(torch.Tensor([
     [1,-1,0],
-    [0,-1,0],
-    [0,1,0],
+    [1,0,0],
+    [0,0,0],
     ]))
-        player = self.a1
-        opp = self.a2
+        player = self.a2
+        opp = self.a1
         while not s0.end:
             AM0 = player(s0)
             s1= s0.next(AM0)
@@ -184,7 +181,7 @@ class Train:
         return loss
     
 def train_loop(
-        episodes = 5,
+        episodes = 1000,
 ):  
     train = Train()
 
