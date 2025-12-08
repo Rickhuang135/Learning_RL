@@ -15,7 +15,7 @@ class Board:
                 self.state: torch.Tensor = init_state
             self.legal_moves=torch.where(self.state==0,1,0)
             self.end =False
-            self.winner = 0
+            self.winner = None
             self.depth = 0
 
     def write(self, addition_matrix):
