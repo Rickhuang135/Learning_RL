@@ -1,5 +1,4 @@
 import torch
-import numpy as np
 import math
 import time
 from tack_board import Board
@@ -222,5 +221,5 @@ def infer(s: Board, id=1):
 
 # root=infer(s0, 1)
 
-from tack_board import play
-play(infer)
+# from tack_board import play
+# play(infer)

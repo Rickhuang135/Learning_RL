@@ -7,28 +7,26 @@ from tack_board import *
 from tack_nn import ValueModel
 from tack_nn import PolicyModel
 from tack_ultils import pt
+from tack_ultils import find_model
 from device import device
+from datetime import datetime
+import time
+import json
 
 torch.set_printoptions(sci_mode=False)
 torch.set_printoptions(precision= 3)
 np.set_printoptions(precision = 3)
 
+MODELPATH = "./tack_models/"
+
 class EpisodeData:
     def __init__(self):
-        self.Pi_loss =0
-        self.V_loss = 0
-        self.total_rp = 0
-        self.total_ro = 0
-    
-    def flip(self):
-        self.total_rp, self.total_ro = self.total_ro, self.total_rp
-
-    def r_both(self, value):
-        self.total_rp+=value
-        self.total_ro+=value
+        self.Pi_loss =0.0
+        self.V_loss = 0.0
+        self.entropy_loss =0.0
 
     def __repr__(self):
-        return f"Pi_loss: {self.Pi_loss:.3f} \t V_loss: {self.V_loss:.3f} \t total_rewards: {self.total_rp:>3}, {self.total_ro:>5}"
+        return f"Pi_loss: {self.Pi_loss:.5f} \t V_loss: {self.V_loss:.5f} \t Entropy_loss {self.entropy_loss:.5g} "
 
     def __str__(self):
         return self.__repr__()
@@ -42,7 +40,6 @@ class Agent:
         self.Pi.eval()
         with torch.no_grad():
             raw_output = self.Pi(board)
-            # pt(raw_output)
             prob: torch.Tensor = torch.nn.functional.softmax(raw_output, dim=0)
             cum_dist = prob.cumsum(0)
             idx = torch.searchsorted(cum_dist, torch.rand(1).to(device)).to(device)
@@ -51,33 +48,42 @@ class Agent:
             return AM.reshape((3,3))*self.id
                 
 class Train:
-    def __init__(self):
+    def __init__(self, hyper_params: dict):
         self.V = ValueModel().to(device)
         self.Pi = PolicyModel().to(device)
         self.a1 = Agent(1, self.Pi)
         self.a2 = Agent(-1, self.Pi)
-        # self.a2 = lambda x: infer(x)*-1
 
         self.r_win = 1
         self.r_draw = 0
 
-        self.gamma = 0.9
-        self.Psi_discount = 0.002
+        self.hyper_params = hyper_params
+        self.gamma = hyper_params['gamma']
+        self.entropy_beta = hyper_params['entropy_beta']
         self.criterionV = nn.MSELoss()
-        self.optimiserV = optim.Adam(self.V.parameters(),lr=0.0005)
-        self.optimiserPi = optim.Adam(self.Pi.parameters(),lr=0.001)
-
+        self.optimiserV = optim.Adam(self.V.parameters(),lr=hyper_params['V_learn_rate'])
+        self.optimiserPi = optim.Adam(self.Pi.parameters(),lr=hyper_params['Pi_learn_rate'])
+        if "model_prefix" in hyper_params.keys():
+            model_paths, version = find_model(MODELPATH,hyper_params["model_prefix"])
+            self.version = version
+            for model_path in model_paths:
+                if "V_model" in model_path:
+                    self.V.load_state_dict(torch.load(MODELPATH+model_path, weights_only=True))
+                elif "Pi_model" in model_path:
+                    self.Pi.load_state_dict(torch.load(MODELPATH+model_path, weights_only=True))
+        self.steps = 0
         self.verbose = False
     
-    def backprop_with_symmetries(self, V: ValueModel, Pi: PolicyModel, s0: Board, s1: Board, AM0: torch.Tensor, epsiode_loss: EpisodeData | None = None):
+    def backprop_with_symmetries(self, V: ValueModel, Pi: PolicyModel, s0: Board, s1: Board, AM0: torch.Tensor, episode_loss: EpisodeData | None = None):
         V.train()
         Pi.train()
         s0_s = s0.generate_symmetries()
         AM0_s = generate_symmetries(AM0)
         AM0_s = [ AM.flatten() for AM in AM0_s]
         s1_s = s1.generate_symmetries()
-        total_Pi_loss =0
-        total_V_loss =0
+        total_Pi_loss = 0
+        total_V_loss = 0
+        total_entropy_loss = 0
         for index, (s0, s1, AM0) in enumerate(zip(s0_s, s1_s, AM0_s)):
             # update V
             if s1.end:
@@ -101,14 +107,15 @@ class Train:
 
             prob = torch.nn.functional.softmax(logits, dim=0)
             entropy = -prob*log_prob.mean()
-            loss_entropy = -1 * entropy * self.Psi_discount
+            loss_entropy = (-1 * entropy * self.entropy_beta).mean()
 
             Piloss.backward(retain_graph = True)
             # Piloss.backward()
-            loss_entropy.mean().backward()
+            loss_entropy.backward()
 
             self.optimiserPi.step()
             torch.nn.utils.clip_grad_norm_(Pi.parameters(),0.1)
+            total_entropy_loss+= loss_entropy.item()
             total_Pi_loss+=Piloss.item()
             if index==0 and self.verbose:
                 # V information
@@ -142,23 +149,13 @@ class Train:
                 # print("Entropy loss")
                 # pt(loss_entropy)
 
-                # Pi.eval()
-                # logits = Pi(s0)
-                # log_prob = torch.nn.functional.log_softmax(logits, dim=0)
-                # prob = torch.nn.functional.softmax(logits, dim=0)
-                # entropy = -prob*log_prob.mean()
-                # print("Policy")
-                # pt(prob)
-                # print("Log prob")
-                # pt(log_prob)
-                # print("Entropy")
-                # pt(entropy)
-                # Pi.train()
-
             break
-        if epsiode_loss is not None:
-            epsiode_loss.Pi_loss+=total_Pi_loss
-            epsiode_loss.V_loss+=total_V_loss
+        if episode_loss is not None:
+            episode_loss.Pi_loss+=abs(total_Pi_loss)
+            episode_loss.V_loss+=total_V_loss
+            episode_loss.entropy_loss+=total_entropy_loss
+        
+        self.steps += 1
 
     def episode(self):
         loss = EpisodeData()
@@ -166,11 +163,11 @@ class Train:
         s0 = Board()
         s0.write(torch.Tensor([
     [1,-1,0],
-    [1,0,0],
+    [0,0,0],
     [0,0,0],
     ]))
-        player = self.a2
-        opp = self.a1
+        player = self.a1
+        opp = self.a2
         while not s0.end:
             AM0 = player(s0)
             s1= s0.next(AM0)
@@ -180,17 +177,62 @@ class Train:
             s0 = s1
         return loss
     
+    def save(self, increment_version = True, extra_info: dict = {}):
+        if 'model_prefix' in self.hyper_params.keys():
+            if increment_version:
+                self.version[1]+=1
+            prefix = self.hyper_params['model_prefix']
+            version_str = '_'.join(str(x) for x in (self.version))
+            saved_paths = [
+                f"./{MODELPATH}/{prefix}_V_model#{version_str}.pt",
+                f"./{MODELPATH}/{prefix}_Pi_model#{version_str}.pt",
+                f"./{MODELPATH}/{prefix}#{version_str}.json",
+            ]
+        else:
+            now = datetime.now().strftime('%m_%d_%H%M')
+            saved_paths = [
+                f"./{MODELPATH}/{now}_tack3_V_model#0_0.pt",
+                f"./{MODELPATH}/{now}_tack3_Pi_model#0_0.pt",
+                f"./{MODELPATH}/{now}#0_0.json",
+            ]
+        torch.save(self.V.state_dict(), saved_paths[0])
+        torch.save(self.Pi.state_dict(), saved_paths[1])
+        info_dict = dict(self.hyper_params)
+        info_dict.update(extra_info)
+        with open(saved_paths[2], "w") as file:
+            json.dump(info_dict, file, indent=4)
+        return saved_paths
+    
 def train_loop(
-        episodes = 1000,
+        episodes = 10,
 ):  
-    train = Train()
+    hyper_params = {
+        'gamma':0.95,
+        'entropy_beta':0.0022,
+        'V_learn_rate': 0.0005,
+        'Pi_learn_rate': 0.0007,
+        'model_prefix': '12_10_1622_tack3',
+    }
+    train = Train(hyper_params)
 
+    begin_time = time.time()
     for i in range(episodes):
-        if episodes-i <= 1:
-            train.verbose=True
+        # if episodes-i <= 1:
+        #     train.verbose=True
         loss = train.episode()
         if i % 5 == 0:
             print(f"{round(i/episodes*100)}% {loss}")
+    time_elapsed = time.time()-begin_time
+    steps_per_second = train.steps/time_elapsed
+    print(f"{train.steps} steps completed in {time_elapsed:.3f} seconds at {steps_per_second:.3f} steps/second")
+
+    if episodes >= 5: # save the model
+        print(f"Model saved to {train.save(increment_version=False, extra_info={
+            "episodes": episodes,
+            "time_elapsed": time_elapsed, 
+            "steps/second": steps_per_second,
+            })}")
+
     return train
 
 a1=train_loop().a1
