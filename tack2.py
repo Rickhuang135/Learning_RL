@@ -5,6 +5,7 @@ import torch.optim as optim
 import numpy as np
 from random import randint
 from random import random
+from time import time
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 win_count = 0
@@ -118,7 +119,8 @@ player = 1
 other = -1
 gamma = 0.8
 epsilon = 1.0
-episodes = 10000
+episodes = 1000
+steps = 0
 
 interval = episodes//10
 step_size = epsilon/10
@@ -138,6 +140,8 @@ def back(s0: torch.Tensor, p_reward, p_min_a1, v=False):
         print(f"label: \n{label.reshape(3,3)}")
         print(f"loss: {loss}")
     optimiser.step()
+    global steps
+    steps+=1
     return loss.item()
 
 optimiser.zero_grad()
@@ -145,6 +149,7 @@ with torch.no_grad():
     pQ0 = model(state())
 s0 = torch.clone(state())
 begin = True
+start_time = time()
 for i in range(episodes):
     runningloss = 0
     total_reward = 0
@@ -193,7 +198,9 @@ for i in range(episodes):
     if i % interval ==0:
         epsilon -= step_size
 
-print(f"win_count == {win_count}")
+time_elapsed = time()-start_time
+steps_per_second = steps/time_elapsed
+print(f"win_count == {win_count} at {steps_per_second:.3f} steps/second")
 
 def play():
     end = False

@@ -5,7 +5,7 @@ from tack_ultils import generate_symmetries
 from tack_ultils import coords_to_AM
 from device import device
 
-mat3x3_template = torch.zeros(3,3, dtype=torch.float32).to(device)
+mat3x3_template = torch.zeros(3,3, dtype=torch.float32, device= device)
 
 class Board:
     def __init__(self,  init_state=None, isclone=False):

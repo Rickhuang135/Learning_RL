@@ -151,7 +151,7 @@ class Train:
 
             break
         if episode_loss is not None:
-            episode_loss.Pi_loss+=abs(total_Pi_loss)
+            episode_loss.Pi_loss+=torch.abs(total_Pi_loss)
             episode_loss.V_loss+=total_V_loss
             episode_loss.entropy_loss+=total_entropy_loss
         
@@ -210,14 +210,14 @@ class Train:
         return saved_paths
     
 def train_loop(
-        episodes = 500,
+        episodes = 100,
 ):  
     hyper_params = {
         'gamma':0.95,
         'entropy_beta':0.0022,
         'V_learn_rate': 0.0005,
         'Pi_learn_rate': 0.0007,
-        'model_prefix': '12_10_1622_tack3',
+        # 'model_prefix': '12_10_1622_tack3',
     }
     train = Train(hyper_params)
     print_period = min(episodes//10, 50)
@@ -233,7 +233,7 @@ def train_loop(
     steps_per_second = train.steps/time_elapsed
     print(f"{train.steps} steps completed in {time_elapsed:.3f} seconds at {steps_per_second:.3f} steps/second")
 
-    if episodes >= 50: # save the model
+    if episodes >= 5000: # save the model
         print(f"Model saved to {train.save(increment_version=False, extra_info={
             "episodes": episodes,
             "time_elapsed": time_elapsed, 
