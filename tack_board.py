@@ -1,16 +1,17 @@
 import torch
-import numpy as np
 
 from random import random
 from tack_ultils import generate_symmetries
 from tack_ultils import coords_to_AM
 from device import device
 
+mat3x3_template = torch.zeros(3,3, dtype=torch.float32).to(device)
+
 class Board:
     def __init__(self,  init_state=None, isclone=False):
         if not isclone:
             if init_state is None:
-                self.state =torch.tensor(np.zeros((3,3))).to(device)
+                self.state = torch.clone(mat3x3_template)
             else:
                 self.state: torch.Tensor = init_state
             self.legal_moves=torch.where(self.state==0,1,0)

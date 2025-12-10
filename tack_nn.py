@@ -6,11 +6,11 @@ NEG_INF = -1e20
 class DeepQModel(nn.Module): #inputs the current state of the board, outputs the expected return for making move at each grid
     def __init__(self):
         super(DeepQModel, self).__init__()
-        self.l1 = nn.Linear(9, 1000, dtype=float)
+        self.l1 = nn.Linear(9, 1000, dtype=torch.float32)
         self.a1 = nn.ReLU()
-        self.l2 = nn.Linear(1000, 80, dtype=float)
+        self.l2 = nn.Linear(1000, 80, dtype=torch.float32)
         self.a2 = nn.ReLU()
-        self.lo = nn.Linear(80,9, dtype=float)
+        self.lo = nn.Linear(80,9, dtype=torch.float32)
         self.ao = nn.Softplus()
 
     def forward(self, mat3x3: torch.Tensor) -> torch.Tensor:
@@ -24,11 +24,11 @@ class DeepQModel(nn.Module): #inputs the current state of the board, outputs the
 class PolicyModel(nn.Module): #inputs the current state of the board, outputs the probability of making each move
     def __init__(self):
         super(PolicyModel, self).__init__()
-        self.l1 = nn.Linear(9,1000, dtype=float)
+        self.l1 = nn.Linear(9,1000, dtype=torch.float32)
         self.a1 = nn.ReLU()
-        self.l2 = nn.Linear(1000,100, dtype=float)
+        self.l2 = nn.Linear(1000,100, dtype=torch.float32)
         self.a2 = nn.ReLU()
-        self.lo = nn.Linear(100,9, dtype=float)
+        self.lo = nn.Linear(100,9, dtype=torch.float32)
     
     def forward(self, board: Board) -> torch.Tensor:
         x = torch.clone(board.state.flatten())
@@ -43,13 +43,13 @@ class PolicyModel(nn.Module): #inputs the current state of the board, outputs th
 class ValueModel(nn.Module): #inputs the current state of the board, outputs the expected result from this position
     def __init__(self):
         super(ValueModel, self).__init__()
-        self.l1 = nn.Linear(9, 1000, dtype=float)
+        self.l1 = nn.Linear(9, 1000, dtype=torch.float32)
         self.a1 = nn.ReLU()
-        self.l2 = nn.Linear(1000, 160, dtype=float)
+        self.l2 = nn.Linear(1000, 160, dtype=torch.float32)
         self.a2 = nn.ReLU()
-        self.l3 = nn.Linear(160, 9, dtype=float)
+        self.l3 = nn.Linear(160, 9, dtype=torch.float32)
         self.a3 = nn.ReLU()
-        self.lo = nn.Linear(9,1, dtype=float)
+        self.lo = nn.Linear(9,1, dtype=torch.float32)
 
     def forward(self, mat3x3: torch.Tensor) -> torch.Tensor:
         x = torch.clone(mat3x3.flatten())

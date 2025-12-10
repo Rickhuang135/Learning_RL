@@ -8,7 +8,7 @@ from tack_nn import ValueModel
 from tack_nn import PolicyModel
 from tack_ultils import pt
 from tack_ultils import find_model
-from device import device
+from device import *
 from datetime import datetime
 import time
 import json
@@ -21,12 +21,12 @@ MODELPATH = "./tack_models/"
 
 class EpisodeData:
     def __init__(self):
-        self.Pi_loss =0.0
-        self.V_loss = 0.0
-        self.entropy_loss =0.0
+        self.Pi_loss = torch.zeros(1, device=device)
+        self.V_loss = torch.zeros(1, device=device)
+        self.entropy_loss = torch.zeros(1, device=device)
 
     def __repr__(self):
-        return f"Pi_loss: {self.Pi_loss:.5f} \t V_loss: {self.V_loss:.5f} \t Entropy_loss {self.entropy_loss:.5g} "
+        return f"Pi_loss: {self.Pi_loss.item():.5f} \t V_loss: {self.V_loss.item():.5f} \t Entropy_loss {self.entropy_loss.item():.5g} "
 
     def __str__(self):
         return self.__repr__()
@@ -42,8 +42,8 @@ class Agent:
             raw_output = self.Pi(board)
             prob: torch.Tensor = torch.nn.functional.softmax(raw_output, dim=0)
             cum_dist = prob.cumsum(0)
-            idx = torch.searchsorted(cum_dist, torch.rand(1).to(device)).to(device)
-            AM: torch.Tensor = torch.zeros(9).to(device)
+            idx = torch.searchsorted(cum_dist, torch.rand(1, device=device))
+            AM: torch.Tensor = torch.zeros_like(prob)
             AM[idx]=1
             return AM.reshape((3,3))*self.id
                 
@@ -81,13 +81,13 @@ class Train:
         AM0_s = generate_symmetries(AM0)
         AM0_s = [ AM.flatten() for AM in AM0_s]
         s1_s = s1.generate_symmetries()
-        total_Pi_loss = 0
-        total_V_loss = 0
-        total_entropy_loss = 0
+        total_Pi_loss = torch.zeros(1, device=device)
+        total_V_loss = torch.zeros(1, device=device)
+        total_entropy_loss = torch.zeros(1, device=device)
         for index, (s0, s1, AM0) in enumerate(zip(s0_s, s1_s, AM0_s)):
             # update V
             if s1.end:
-                Vs1 = s1.winner * (self.r_win - s1.depth*0.01) * torch.ones(1, dtype=torch.double).to(device) #type:ignore
+                Vs1 = s1.winner * (self.r_win - s1.depth*0.01) * torch.ones(1, dtype=torch.float32, device=device) #type:ignore
             else:
                 Vs1 = V(s1.state).detach()
             self.optimiserV.zero_grad()
@@ -96,7 +96,7 @@ class Train:
             Vloss = self.criterionV(Vs0, Vlabel)
             Vloss.backward()
             self.optimiserV.step()
-            total_V_loss += Vloss.item()
+            total_V_loss += Vloss
             
             # update Pi with Advantage function
             A = (Vs1 * self.gamma - Vs0.detach())*AM0[AM0!=0]
@@ -115,8 +115,8 @@ class Train:
 
             self.optimiserPi.step()
             torch.nn.utils.clip_grad_norm_(Pi.parameters(),0.1)
-            total_entropy_loss+= loss_entropy.item()
-            total_Pi_loss+=Piloss.item()
+            total_entropy_loss+= loss_entropy
+            total_Pi_loss+=Piloss
             if index==0 and self.verbose:
                 # V information
                 print(f"\n\nInstance of V_backprop\n")
@@ -165,7 +165,7 @@ class Train:
     [1,-1,0],
     [0,0,0],
     [0,0,0],
-    ]))
+    ]).to(device))
         player = self.a1
         opp = self.a2
         while not s0.end:
@@ -197,14 +197,20 @@ class Train:
             ]
         torch.save(self.V.state_dict(), saved_paths[0])
         torch.save(self.Pi.state_dict(), saved_paths[1])
-        info_dict = dict(self.hyper_params)
+        info_dict = {
+            'device': str(device)
+        }
+        info_dict.update(self.hyper_params)
+        info_dict.update({ # type:ignore
+            'steps': self.steps,  # type:ignore
+        })
         info_dict.update(extra_info)
         with open(saved_paths[2], "w") as file:
             json.dump(info_dict, file, indent=4)
         return saved_paths
     
 def train_loop(
-        episodes = 10,
+        episodes = 500,
 ):  
     hyper_params = {
         'gamma':0.95,
@@ -214,19 +220,20 @@ def train_loop(
         'model_prefix': '12_10_1622_tack3',
     }
     train = Train(hyper_params)
+    print_period = min(episodes//10, 50)
 
     begin_time = time.time()
     for i in range(episodes):
         # if episodes-i <= 1:
         #     train.verbose=True
         loss = train.episode()
-        if i % 5 == 0:
+        if i % print_period == 0:
             print(f"{round(i/episodes*100)}% {loss}")
     time_elapsed = time.time()-begin_time
     steps_per_second = train.steps/time_elapsed
     print(f"{train.steps} steps completed in {time_elapsed:.3f} seconds at {steps_per_second:.3f} steps/second")
 
-    if episodes >= 5: # save the model
+    if episodes >= 50: # save the model
         print(f"Model saved to {train.save(increment_version=False, extra_info={
             "episodes": episodes,
             "time_elapsed": time_elapsed, 
