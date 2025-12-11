@@ -32,16 +32,14 @@ class A2CModel(nn.Module): # Advantage Actor Critic Model
         self.V = nn.Linear(160,1)
 
     
-    def forward(self, board: Board, Pi_only = False, V_only = False) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
-        x = board.state.flatten()
-        x = self.encoder(x)
+    def forward(self, state: torch.Tensor, Pi_only = False, V_only = False) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
+        x = self.encoder(state)
         if V_only:
             return self.V(x)
         else:
             logits = self.Pi(x)
-            mask = torch.clone(board.legal_moves.flatten())
             neg_inf_tensor = torch.full_like(logits, NEG_INF)
-            Pi_out = torch.where(mask==1, logits, neg_inf_tensor)
+            Pi_out = torch.where(state==0, logits, neg_inf_tensor) # state==0 yeilds boolean mask for legal moves
             if Pi_only:
                 return Pi_out
             else:

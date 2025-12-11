@@ -38,7 +38,7 @@ class Agent:
     def __call__(self, board: Board):
         self.model.eval()
         with torch.no_grad():
-            raw_output = self.model(board, Pi_only = True)
+            raw_output = self.model(extract_state(board), Pi_only = True)
             prob: torch.Tensor = torch.nn.functional.softmax(raw_output, dim=0)
             cum_dist = prob.cumsum(0)
             idx = torch.searchsorted(cum_dist, torch.rand(1, device=device))
@@ -60,6 +60,7 @@ class Train:
         self.entropy_beta = hyper_params['entropy_beta']
         self.criterionV = nn.MSELoss()
         self.optimiser = optim.Adam(self.model.parameters(),lr=hyper_params['learn_rate'])
+        self.replay_buffer_length = hyper_params['replay_buffer_length']
         if "model_prefix" in hyper_params.keys():
             model_paths, version = find_model(MODELPATH,hyper_params["model_prefix"])
             self.version = version
@@ -70,87 +71,50 @@ class Train:
         self.steps = 0
         self.verbose = False
     
-    def backprop_with_symmetries(self, model: A2CModel, s0: Board, s1: Board, AM0: torch.Tensor, episode_loss: EpisodeData | None = None):
-        s0_s = s0.generate_symmetries()
-        AM0_s = generate_symmetries(AM0)
-        AM0_s = [ AM.flatten() for AM in AM0_s]
-        s1_s = s1.generate_symmetries()
-        total_Pi_loss = torch.zeros(1, device=device)
-        total_V_loss = torch.zeros(1, device=device)
-        total_entropy_loss = torch.zeros(1, device=device)
-        for index, (s0, s1, AM0) in enumerate(zip(s0_s, s1_s, AM0_s)):
-            # update V
-            if s1.end:
-                Vs1 = s1.winner * (self.r_win - s1.depth*0.01) * torch.ones(1, dtype=torch.float32, device=device) #type:ignore
-            else:
-                model.eval()
-                Vs1 = model(s1, V_only = True).detach()
-            model.train()
+    def backprop_with_symmetries(self, model: A2CModel, rb: ReplayBuffer , winner: int|None = None, episode_loss: EpisodeData | None = None):
+        dataset=BoardDataset(rb)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=len(dataset))
+        model.train()
+        for states, actions in dataloader:
             self.optimiser.zero_grad()
-            logits, Vs0 = model(s0)
+            logits, values = model(states)
+            rotation_period = len(values)//len(rb)
+            values_means = torch.sum(values.reshape(-1, rotation_period), dim=-1)
+            if winner is not None:
+                V_last_state = winner * (self.r_win  - rb.depth*0.01)
+                value_labels = torch.clone(values_means).detach()
+                value_labels[-1] = V_last_state
+                Vloss = self.criterionV(values_means, value_labels)
+            else:
+                value_labels = values_means[1:].detach() * self.gamma
+                Vloss = self.criterionV(values_means[:-1], value_labels)
 
-            Vlabel = Vs1*self.gamma
-            Vloss = self.criterionV(Vs0, Vlabel)
+            As = (values_means[1:]-values_means[:-1]).detach()
+            As = As.repeat(rotation_period, 1).transpose(1,0).flatten()
+            log_prob = torch.nn.functional.log_softmax(logits, dim=-1)
+            valid_actions = actions[:-rotation_period] # filtering out AMNone value
+            valid_log_prob = log_prob[:-rotation_period]
+            Piloss = (-1* valid_log_prob[valid_actions!=0] * As).sum()
             
-            # update Pi with Advantage function
-            A = (Vs1 * self.gamma - Vs0.detach())*AM0[AM0!=0]
-            log_prob = torch.nn.functional.log_softmax(logits, dim=0)
-            Piloss = -1*log_prob[AM0!=0]*A
-
-            prob = torch.nn.functional.softmax(logits, dim=0)
-            entropy = -prob*log_prob.mean()
-            loss_entropy = (-1 * entropy * self.entropy_beta).mean()
-            (Piloss+Vloss+loss_entropy).backward()
-            total_V_loss += Vloss
-            total_entropy_loss+= loss_entropy
-            total_Pi_loss+=Piloss
-
-            torch.nn.utils.clip_grad_norm_(model.parameters(),0.1)
+            prob = torch.nn.functional.softmax(logits, dim=-1)
+            entropy = -(prob*log_prob).sum(dim=1).mean()
+            entropy_loss = -1 * self.entropy_beta * entropy
+            
+            (Vloss+Piloss+entropy_loss).backward()
             self.optimiser.step()
-            if index==0 and self.verbose:
-                # V information
-                print(f"\n\nInstance of V_backprop\n")
-                print(f"board: \n{s0}")
-                print("Vs0: Value at state 0")
-                pt(Vs0)
-                print("move")
-                pt(AM0)
-                print("Vs1: Value at state 1")
-                pt(Vs1)
-                print("Vlabel")
-                pt(Vlabel)
-                print(f"loss: {Vloss.cpu().item()}")
-
-                # Pi information
-                print("\nInstance of Pi_backprop\n")
-                print(f"board: \n{s0}")
-                print("Policy")
-                pt(prob)
-                print("Log prob")
-                pt(log_prob)
-                print("move")
-                pt(AM0)
-                print("advantage")
-                pt(A)
-                print("Piloss:")
-                pt(Piloss)
-                # print("Entropy")
-                # pt(entropy)
-                # print("Entropy loss")
-                # pt(loss_entropy)
-
-            break
-        if episode_loss is not None:
-            episode_loss.Pi_loss+=torch.abs(total_Pi_loss)
-            episode_loss.V_loss+=total_V_loss
-            episode_loss.entropy_loss+=total_entropy_loss
+            
+            if episode_loss is not None:
+                episode_loss.Pi_loss+=torch.abs(Piloss)
+                episode_loss.V_loss+=torch.abs(Vloss)
+                episode_loss.entropy_loss+=entropy_loss
         
-        self.steps += 1
+        self.steps += len(dataset) -1 
+        # self.steps += 1
 
     def episode(self):
         loss = EpisodeData()
-
         s0 = Board()
+        rb = ReplayBuffer(s0)
     #     s0.write(torch.Tensor([
     # [1,-1,0],
     # [0,0,0],
@@ -159,12 +123,18 @@ class Train:
         player = self.a1
         opp = self.a2
         while not s0.end:
+            if len(rb) == self.replay_buffer_length:
+                self.backprop_with_symmetries(self.model, rb, episode_loss=loss)
+                rb.empty()
             AM0 = player(s0)
             s1= s0.next(AM0)
-            self.backprop_with_symmetries(self.model, s0, s1,AM0, loss)
+            rb.append(s1,AM0)
             player, opp = opp, player
             del AM0, s0
             s0 = s1
+
+        if len(rb) > 1:
+            self.backprop_with_symmetries(self.model, rb, winner=s0.winner, episode_loss=loss)
         return loss
     
     def save(self, increment_version = True, extra_info: dict = {}):
@@ -197,12 +167,13 @@ class Train:
         return saved_paths
     
 def train_loop(
-        episodes = 100,
+        episodes = 1000,
 ):  
     hyper_params = {
         'gamma':0.95,
         'entropy_beta':0.03,
         'learn_rate': 0.0001,
+        'replay_buffer_length': 4,
         # 'model_prefix': '12_10_1622_tack3',
     }
     train = Train(hyper_params)

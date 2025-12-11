@@ -1,11 +1,15 @@
 import torch
 
 from random import random
-from tack_ultils import generate_symmetries
 from tack_ultils import coords_to_AM
 from device import device
 
 mat3x3_template = torch.zeros(3,3, dtype=torch.float32, device= device)
+AMNone = torch.tensor([
+    -2, 2, 0,
+    2,0,-2,
+    0,-2,2,
+], dtype=torch.float32, device= device)
 
 class Board:
     def __init__(self,  init_state=None, isclone=False):
@@ -14,14 +18,12 @@ class Board:
                 self.state = torch.clone(mat3x3_template)
             else:
                 self.state: torch.Tensor = init_state
-            self.legal_moves=torch.where(self.state==0,1,0)
             self.end =False
             self.winner = None
             self.depth = 0
 
     def write(self, addition_matrix):
         self.state+=addition_matrix
-        self.legal_moves[addition_matrix!=0]=0
         value = addition_matrix[addition_matrix!=0][0] # assumes one move at a time
         match self.is_end():
             case 1:
@@ -36,14 +38,12 @@ class Board:
     def next(self, addition_matrix):
         result = self.copy()
         result.write(addition_matrix)
-        # result.state*=-1
         result.depth +=1
         return result
 
     def copy(self):
         b=Board(isclone=True)
         b.state=torch.clone(self.state)
-        b.legal_moves=torch.clone(self.legal_moves)
         b.end=self.end
         b.depth = self.depth
         return b
@@ -80,6 +80,49 @@ class Board:
             
         return results
     
+class ReplayBuffer:
+    # all internal representations of type torch.Tensor
+    def __init__(self, board: Board):
+        self.states: list[torch.Tensor] = [extract_state(board)]
+        self.actions: list[torch.Tensor] = [AMNone]
+        self.depth = 0
+    
+    def __len__(self):
+        return len(self.states)
+    
+    def __str__(self):
+        result = ""
+        for state, action in zip(self.states, self.actions):
+            result += f"{state.reshape(3,3).cpu().numpy()}\n"
+            if not torch.equal(action, AMNone):
+                result += f"{action.reshape(3,3).cpu().numpy()}\n"
+        return result
+    
+    def __getitem__(self, index):
+        return self.states[index], self.actions[index]
+
+    def append(self, board: Board, new_action: torch.Tensor):
+        self.states.append(extract_state(board))
+        self.actions[-1] = new_action.flatten()
+        self.actions.append(AMNone)
+        self.depth+=1
+
+    def empty(self):
+        self.states = self.states[-1:]
+        self.actions = self.actions[-1:]
+
+class BoardDataset(torch.utils.data.Dataset):
+    def __init__(self, rb: ReplayBuffer):
+        self.states = torch.concat([generate_symmetries(s) for s in rb.states], dim=0)
+        self.actions = torch.concat([generate_symmetries(a) for a in rb.actions], dim=0)
+    
+    def __len__(self):
+        return len(self.states)
+
+    def __getitem__(self, ind):
+        return self.states[ind], self.actions[ind]
+
+    
 def play(Agent,init_board=None,player_turn=False, player_id=-1):
     if init_board is None:
         board=Board()
@@ -101,3 +144,23 @@ def play(Agent,init_board=None,player_turn=False, player_id=-1):
             AM = Agent(board, id=player_id*-1)
         board.write(AM)
         return play(Agent, board, not player_turn, player_id)
+
+def extract_state(board: Board) -> torch.Tensor:
+    return board.state.flatten()
+
+def generate_symmetries(matflat: torch.Tensor) -> torch.Tensor:
+    opps = [
+        torch.clone,
+        lambda x: torch.flip(x, [1,0]),
+        torch.fliplr,
+        torch.flipud,
+        lambda x: torch.transpose(x, 1, 0),
+        torch.rot90,
+        lambda x: torch.rot90(x, 3),
+    ]
+    if torch.equal(matflat, AMNone):
+        return AMNone.repeat(len(opps), 1)
+    else:
+        mat3x3 = matflat.reshape(3,3)
+        resulT3x3 = torch.stack([f(mat3x3) for f in opps])
+        return torch.flatten(resulT3x3, start_dim=1, end_dim=2)
