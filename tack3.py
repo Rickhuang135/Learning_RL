@@ -4,8 +4,7 @@ import torch.optim as optim
 import numpy as np
 
 from tack_board import *
-from tack_nn import ValueModel
-from tack_nn import PolicyModel
+from tack_nn import A2CModel
 from tack_ultils import pt
 from tack_ultils import find_model
 from device import *
@@ -32,14 +31,14 @@ class EpisodeData:
         return self.__repr__()
 
 class Agent:
-    def __init__(self, id: int, Pi:PolicyModel):
-        self.Pi = Pi
+    def __init__(self, id: int, model: A2CModel):
+        self.model = model
         self.id = id # id can not be zero
 
-    def __call__(self, board):
-        self.Pi.eval()
+    def __call__(self, board: Board):
+        self.model.eval()
         with torch.no_grad():
-            raw_output = self.Pi(board)
+            raw_output = self.model(board, Pi_only = True)
             prob: torch.Tensor = torch.nn.functional.softmax(raw_output, dim=0)
             cum_dist = prob.cumsum(0)
             idx = torch.searchsorted(cum_dist, torch.rand(1, device=device))
@@ -49,10 +48,9 @@ class Agent:
                 
 class Train:
     def __init__(self, hyper_params: dict):
-        self.V = ValueModel().to(device)
-        self.Pi = PolicyModel().to(device)
-        self.a1 = Agent(1, self.Pi)
-        self.a2 = Agent(-1, self.Pi)
+        self.model = A2CModel().to(device)
+        self.a1 = Agent(1, self.model)
+        self.a2 = Agent(-1, self.model)
 
         self.r_win = 1
         self.r_draw = 0
@@ -61,22 +59,18 @@ class Train:
         self.gamma = hyper_params['gamma']
         self.entropy_beta = hyper_params['entropy_beta']
         self.criterionV = nn.MSELoss()
-        self.optimiserV = optim.Adam(self.V.parameters(),lr=hyper_params['V_learn_rate'])
-        self.optimiserPi = optim.Adam(self.Pi.parameters(),lr=hyper_params['Pi_learn_rate'])
+        self.optimiser = optim.Adam(self.model.parameters(),lr=hyper_params['learn_rate'])
         if "model_prefix" in hyper_params.keys():
             model_paths, version = find_model(MODELPATH,hyper_params["model_prefix"])
             self.version = version
             for model_path in model_paths:
-                if "V_model" in model_path:
-                    self.V.load_state_dict(torch.load(MODELPATH+model_path, weights_only=True))
-                elif "Pi_model" in model_path:
-                    self.Pi.load_state_dict(torch.load(MODELPATH+model_path, weights_only=True))
+                if "model" in model_path:
+                    print(f"loading model {model_path} of version {self.version}")
+                    self.model.load_state_dict(torch.load(MODELPATH+model_path, weights_only=True))
         self.steps = 0
         self.verbose = False
     
-    def backprop_with_symmetries(self, V: ValueModel, Pi: PolicyModel, s0: Board, s1: Board, AM0: torch.Tensor, episode_loss: EpisodeData | None = None):
-        V.train()
-        Pi.train()
+    def backprop_with_symmetries(self, model: A2CModel, s0: Board, s1: Board, AM0: torch.Tensor, episode_loss: EpisodeData | None = None):
         s0_s = s0.generate_symmetries()
         AM0_s = generate_symmetries(AM0)
         AM0_s = [ AM.flatten() for AM in AM0_s]
@@ -89,34 +83,30 @@ class Train:
             if s1.end:
                 Vs1 = s1.winner * (self.r_win - s1.depth*0.01) * torch.ones(1, dtype=torch.float32, device=device) #type:ignore
             else:
-                Vs1 = V(s1.state).detach()
-            self.optimiserV.zero_grad()
-            Vs0 = V(s0.state)
+                model.eval()
+                Vs1 = model(s1, V_only = True).detach()
+            model.train()
+            self.optimiser.zero_grad()
+            logits, Vs0 = model(s0)
+
             Vlabel = Vs1*self.gamma
             Vloss = self.criterionV(Vs0, Vlabel)
-            Vloss.backward()
-            self.optimiserV.step()
-            total_V_loss += Vloss
             
             # update Pi with Advantage function
             A = (Vs1 * self.gamma - Vs0.detach())*AM0[AM0!=0]
-            self.optimiserPi.zero_grad()
-            logits = Pi(s0)
             log_prob = torch.nn.functional.log_softmax(logits, dim=0)
             Piloss = -1*log_prob[AM0!=0]*A
 
             prob = torch.nn.functional.softmax(logits, dim=0)
             entropy = -prob*log_prob.mean()
             loss_entropy = (-1 * entropy * self.entropy_beta).mean()
-
-            Piloss.backward(retain_graph = True)
-            # Piloss.backward()
-            loss_entropy.backward()
-
-            self.optimiserPi.step()
-            torch.nn.utils.clip_grad_norm_(Pi.parameters(),0.1)
+            (Piloss+Vloss+loss_entropy).backward()
+            total_V_loss += Vloss
             total_entropy_loss+= loss_entropy
             total_Pi_loss+=Piloss
+
+            torch.nn.utils.clip_grad_norm_(model.parameters(),0.1)
+            self.optimiser.step()
             if index==0 and self.verbose:
                 # V information
                 print(f"\n\nInstance of V_backprop\n")
@@ -161,17 +151,17 @@ class Train:
         loss = EpisodeData()
 
         s0 = Board()
-        s0.write(torch.Tensor([
-    [1,-1,0],
-    [0,0,0],
-    [0,0,0],
-    ]).to(device))
+    #     s0.write(torch.Tensor([
+    # [1,-1,0],
+    # [0,0,0],
+    # [0,0,0],
+    # ]).to(device))
         player = self.a1
         opp = self.a2
         while not s0.end:
             AM0 = player(s0)
             s1= s0.next(AM0)
-            self.backprop_with_symmetries(self.V,self.Pi, s0, s1,AM0, loss)
+            self.backprop_with_symmetries(self.model, s0, s1,AM0, loss)
             player, opp = opp, player
             del AM0, s0
             s0 = s1
@@ -184,19 +174,16 @@ class Train:
             prefix = self.hyper_params['model_prefix']
             version_str = '_'.join(str(x) for x in (self.version))
             saved_paths = [
-                f"./{MODELPATH}/{prefix}_V_model#{version_str}.pt",
-                f"./{MODELPATH}/{prefix}_Pi_model#{version_str}.pt",
+                f"./{MODELPATH}/{prefix}_model#{version_str}.pt",
                 f"./{MODELPATH}/{prefix}#{version_str}.json",
             ]
         else:
             now = datetime.now().strftime('%m_%d_%H%M')
             saved_paths = [
-                f"./{MODELPATH}/{now}_tack3_V_model#0_0.pt",
-                f"./{MODELPATH}/{now}_tack3_Pi_model#0_0.pt",
-                f"./{MODELPATH}/{now}#0_0.json",
+                f"./{MODELPATH}/{now}_tack3_model#0_0.pt",
+                f"./{MODELPATH}/{now}_tack3#0_0.json",
             ]
-        torch.save(self.V.state_dict(), saved_paths[0])
-        torch.save(self.Pi.state_dict(), saved_paths[1])
+        torch.save(self.model, saved_paths[0])
         info_dict = {
             'device': str(device)
         }
@@ -205,7 +192,7 @@ class Train:
             'steps': self.steps,  # type:ignore
         })
         info_dict.update(extra_info)
-        with open(saved_paths[2], "w") as file:
+        with open(saved_paths[1], "w") as file:
             json.dump(info_dict, file, indent=4)
         return saved_paths
     
@@ -214,9 +201,8 @@ def train_loop(
 ):  
     hyper_params = {
         'gamma':0.95,
-        'entropy_beta':0.0022,
-        'V_learn_rate': 0.0005,
-        'Pi_learn_rate': 0.0007,
+        'entropy_beta':0.03,
+        'learn_rate': 0.0001,
         # 'model_prefix': '12_10_1622_tack3',
     }
     train = Train(hyper_params)
@@ -224,8 +210,8 @@ def train_loop(
 
     begin_time = time.time()
     for i in range(episodes):
-        # if episodes-i <= 1:
-        #     train.verbose=True
+        if episodes-i <= 2:
+            train.verbose=True
         loss = train.episode()
         if i % print_period == 0:
             print(f"{round(i/episodes*100)}% {loss}")
