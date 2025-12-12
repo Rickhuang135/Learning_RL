@@ -5,7 +5,6 @@ import numpy as np
 
 from tack_board import *
 from tack_nn import A2CModel
-from tack_ultils import pt
 from tack_ultils import find_model
 from device import *
 from datetime import datetime
@@ -15,6 +14,7 @@ import json
 torch.set_printoptions(sci_mode=False)
 torch.set_printoptions(precision= 3)
 np.set_printoptions(precision = 3)
+torch.serialization.add_safe_globals([A2CModel])
 
 MODELPATH = "./tack_models/"
 
@@ -67,7 +67,7 @@ class Train:
             for model_path in model_paths:
                 if "model" in model_path:
                     print(f"loading model {model_path} of version {self.version}")
-                    self.model.load_state_dict(torch.load(MODELPATH+model_path, weights_only=True))
+                    self.model=torch.load(MODELPATH+model_path,map_location=device, weights_only=False)
         self.steps = 0
         self.verbose = False
     
@@ -115,11 +115,11 @@ class Train:
         loss = EpisodeData()
         s0 = Board()
         rb = ReplayBuffer(s0)
-    #     s0.write(torch.Tensor([
-    # [1,-1,0],
-    # [0,0,0],
-    # [0,0,0],
-    # ]).to(device))
+        s0.write(torch.Tensor([
+    [1,-1,0,
+    0,0,0,
+    0,0,0],
+    ]).reshape(3,3).to(device))
         player = self.a1
         opp = self.a2
         while not s0.end:
@@ -173,8 +173,8 @@ def train_loop(
         'gamma':0.95,
         'entropy_beta':0.03,
         'learn_rate': 0.0001,
-        'replay_buffer_length': 4,
-        # 'model_prefix': '12_10_1622_tack3',
+        'replay_buffer_length': 5,
+        # 'model_prefix': '12_12_1245_tack3',
     }
     train = Train(hyper_params)
     print_period = min(episodes//10, 50)
@@ -190,8 +190,8 @@ def train_loop(
     steps_per_second = train.steps/time_elapsed
     print(f"{train.steps} steps completed in {time_elapsed:.3f} seconds at {steps_per_second:.3f} steps/second")
 
-    if episodes >= 5000: # save the model
-        print(f"Model saved to {train.save(increment_version=False, extra_info={
+    if episodes >= 1000: # save the model
+        print(f"Model saved to {train.save(increment_version=True, extra_info={
             "episodes": episodes,
             "time_elapsed": time_elapsed, 
             "steps/second": steps_per_second,
@@ -199,9 +199,38 @@ def train_loop(
 
     return train
 
-a1=train_loop().a1
-# play(lambda board: a1.infer(board)[0])
+train_res=train_loop()
 
+test_positions = torch.tensor([
+    [1,-1,0,
+    0,0,0,
+    0,0,0],
+
+    [1,-1,0,
+    0,1,0,
+    0,0,0],
+
+    [1,-1,0,
+    0,1,0,
+    0,0,-1],
+
+    [1,-1,0,
+    0,1,0,
+    1,0,-1],
+
+    [1,-1,0,
+    -1,1,0,
+    1,0,-1],
+], device=device, dtype=torch.float32)
+
+logits, values = train_res.model(test_positions)
+probs = torch.nn.functional.softmax(logits, -1)
+from tack_ultils import pt
+for prob, value, position in zip(probs, values, test_positions):
+    pt(position)
+    pt(prob)
+    print(value)
+play(lambda board, id: train_res.a1(board) * id)
 
 # components:
 # 1. Board

@@ -26,7 +26,12 @@ class A2CModel(nn.Module): # Advantage Actor Critic Model
         self.encoder = nn.Sequential(
             nn.Linear(9, 2560),
             nn.ReLU(),
-            nn.Linear(2560, 160),
+            nn.Linear(2560, 1800),
+            nn.ReLU(),
+            nn.Linear(1800, 1160),
+            nn.ReLU(),
+            nn.Linear(1160,160),
+            nn.ReLU()
         )
         self.Pi = nn.Linear(160,9)
         self.V = nn.Linear(160,1)
