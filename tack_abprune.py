@@ -46,6 +46,9 @@ def prune(
             return P(value=-10+depth, depth=depth)
     else:
         node = P(actions = np.where(s.state.flatten()==0)[0], depth = depth)
+        if perfect_min_max:
+            beta = 100
+            alpha = -100
         for action in node.actions:
             AM = np.zeros(9)
             AM[action]=id
@@ -57,8 +60,8 @@ def prune(
                 res = prune(sn, id*-1, True, alpha, beta, depth+1, perfect_min_max=perfect_min_max)
                 alpha = max(res.value, alpha) # type:ignore
             node.append(res)
-            if beta<=alpha and not perfect_min_max: # prune when, case min-node: upstream value is greator than current
-                break                               # case max-node: upstream value is lessor than current
+            if beta<=alpha: # prune when, case min-node: upstream value is greator than current
+                break       # case max-node: upstream value is lessor than current
         if min_node:
             node.value=beta
         else:

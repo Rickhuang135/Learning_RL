@@ -13,7 +13,7 @@ class perfectMinMax:
             with open(self.stored_file_name, 'r') as file:
                 self.dict=json.load(file)
         else:
-            print("no existing tree found, generating one")
+            print("no existing tree found, generating ...")
             full_tree= prune(Board(), id=1, perfect_min_max=True).to_dict()
             with open(self.stored_file_name, 'w') as file:
                 json.dump(full_tree, file, indent=4)
@@ -46,7 +46,7 @@ class perfectMinMax:
         return AM.reshape(3,3)
         
 
-def benchmark(benchmarked, benchmarker = perfectMinMax().infer, n_runs = 200):
+def benchmark(benchmarked, benchmarker = perfectMinMax().infer, n_runs = 1000):
     n_draws = 0
     n_wins = 0
     n_loss = 0
