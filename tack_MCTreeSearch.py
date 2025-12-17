@@ -2,26 +2,24 @@ import torch
 import math
 import time
 from tack_board import Board
+from device import device
 
 class MCTS:
     c = math.sqrt(2) # exploration parameter
 
-    def __init__(self, actions: torch.Tensor, head = None, terminal = False):
-        self.head:MCTS | None = head
-        if head is not None:
-            head.append(self)
+    def __init__(self, actions: torch.Tensor = torch.empty(0, device=device), leaf = False):
+        self.head:MCTS | None = None
+        if leaf:
+            self.leaf = self.terminal = True
+        else:
+            self.leaf= self.terminal = False
         self.actions = actions # use indexes i/8
-        self.terminal = terminal
-        self.leaf = False
         self.n_terminal_children = 0
         self.children: list[MCTS | None] = [None for _ in actions]
         self.visits = 0
         self.optimal = None
         self.expanding_action= None
-        if head is None or not head.minimising:
-            self.minimising = True
-        else:
-            self.minimising = False
+        self.minimising = True
         self.value= 0
         self.mean_value = 0
 
@@ -39,11 +37,11 @@ class MCTS:
         if child is None:
             self.expanding_action = action_ind
             depth = len(chain)
-            ids=torch.arange(depth)
-            chain_values = torch.ones(depth)
+            ids=torch.arange(depth, device=device)
+            chain_values = torch.ones(depth, device=device)
             chain_values[ids%2==0] *= id0
             chain_values[ids%2!=0] *= id0*-1
-            AM = torch.zeros(9)
+            AM = torch.zeros(9, device=device)
             AM[torch.stack(chain, dim=0)] = chain_values
             return self, AM.reshape(3,3), depth
         
@@ -65,7 +63,7 @@ class MCTS:
             leaf_or_terminal_text="terminal"
         else:
             leaf_or_terminal_text=''
-        result = f"MCTS {'minimising' if self.minimising else 'maximising'} node with value {self.value}, {leaf_or_terminal_text} \nwith actions {self.actions} \nand children {child_values}"
+        result = f"MCTS {'minimising' if self.minimising else 'maximising'} node with mean value {self.mean_value}, {leaf_or_terminal_text} \nwith actions {self.actions} \nand children {child_values}"
         return result
     
     def __repr__(self):
@@ -81,10 +79,6 @@ class MCTS:
         else:
             sign = 1
         return self.mean_value + sign* self.c*math.sqrt(math.log(self.head.visits)/self.visits)
-    
-    def set_leaf(self):
-        self.leaf = True
-        self.terminal = True
     
 
     def pick_action_child(self, train=True) -> tuple: #recursively finds next action to explore
@@ -110,7 +104,10 @@ class MCTS:
         return next_action, next_child
 
     def append(self, child):
+        child.head=self
+        child.minimising = not self.minimising
         self.children[torch.where(self.actions==self.expanding_action)[0]] = child
+        return child
     
     def percolate_up(self, value, terminal=False) -> None:
         self.value+=value
@@ -135,6 +132,19 @@ class MCTS:
         if self.head is not None:
             self.head.percolate_up(value, self.terminal)
 
+    def to_dict(self):
+        result = {
+            "value": self.optimal if self.terminal else self.mean_value,
+            "actions": self.actions.tolist(),
+            "children": [],
+        }
+        for child in self.children:
+            if child is not None:
+                result["children"].append(child.to_dict())
+            else:
+                result["children"].append(None)
+        return result
+
     # run from starting state to end
         # at starting state, gets list of actions
         # check for new action, take if exist
@@ -146,16 +156,15 @@ class MCTS:
     # create leaf based on first action and value
 
 def ind_to_AM(index_out_of_8):
-    result = torch.zeros(9)
+    result = torch.zeros(9, device=device)
     result[index_out_of_8] = 1
     return result.reshape(3,3)
 
-def actions_from_board(board: Board):
-    legal_moves = board.legal_moves.flatten()
-    return torch.where(legal_moves==1)[0]
+def get_actions(board: Board):
+    return torch.where(board.state.flatten()==0)[0]
 
 def random_move(board: Board, id=1):
-    actions = actions_from_board(board)
+    actions = get_actions(board)
     # print(actions)
     ind = actions[torch.randint(low=0, high=actions.numel(), size=(1,))]
     return ind_to_AM(ind) * id
@@ -164,13 +173,13 @@ def search(
         board: Board,
         id = 1,
         head: MCTS | None = None,
-        run_time = 0.700, # in seconds
-        n_runs = 1000
+        run_time = 0.200, # in seconds
+        n_runs = 4000
 ):
     start_time = time.time()
     current_run = 0
     if head is None:
-        head = MCTS(actions_from_board(board))
+        head = MCTS(get_actions(board))
     else:
         head = head
     # begin looping according to time constraint
@@ -180,19 +189,19 @@ def search(
         parent, AM_multiple, depth = head.expand(id)
         c_id = id*((-1)**(depth))
         current_board.write(AM_multiple)
-        new_node = MCTS(actions_from_board(current_board), head=parent)
-        b_depth = depth
-        # print(current_board)
-        while not current_board.end: # finish episode to get value
-            depth += 1
-            current_board = current_board.next(random_move(current_board, id=c_id))
-            c_id *= -1
-            # print(current_board)
-            # print()
-        
-        if b_depth == depth:
-            new_node.set_leaf()
 
+        if current_board.end:
+            new_node = parent.append(MCTS(leaf=True))
+        else:
+            new_node = parent.append(MCTS(get_actions(current_board)))
+            # print(current_board)
+            while not current_board.end: # finish episode to get value
+                depth += 1
+                current_board = current_board.next(random_move(current_board, id=c_id))
+                c_id *= -1
+                # print(current_board)
+                # print()
+        
         if current_board.winner == 0: # draw
             value = 0
         elif c_id == id: # lost
@@ -217,7 +226,7 @@ def infer(s: Board, id=1):
 #     [[ -1, 0, 1,],
 #     [ 0,  -1,  0,],
 #     [ 0,  0,  0,],]
-# ))
+# ).to(device))
 
 # root=infer(s0, 1)
 

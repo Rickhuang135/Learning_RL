@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import numpy as np
 
 from tack_board import *
 from tack_nn import A2CModel
@@ -10,13 +9,26 @@ from device import *
 from datetime import datetime
 import time
 import json
+import numpy as np
+
+from tack_benchmark import benchmark
 
 torch.set_printoptions(sci_mode=False)
 torch.set_printoptions(precision= 3)
-np.set_printoptions(precision = 3)
 torch.serialization.add_safe_globals([A2CModel])
 
 MODELPATH = "./tack_models/"
+
+class BoardDataset(torch.utils.data.Dataset):
+    def __init__(self, rb: ReplayBuffer):
+        self.states = torch.tensor(np.concat([generate_symmetries(s) for s in rb.states]), dtype = torch.float32).to(device)
+        self.actions = torch.tensor(np.concat([generate_symmetries(a) for a in rb.actions]), dtype = torch.float32).to(device)
+    
+    def __len__(self):
+        return len(self.states)
+
+    def __getitem__(self, ind):
+        return self.states[ind], self.actions[ind]
 
 class EpisodeData:
     def __init__(self):
@@ -38,13 +50,13 @@ class Agent:
     def __call__(self, board: Board):
         self.model.eval()
         with torch.no_grad():
-            raw_output = self.model(extract_state(board), Pi_only = True)
+            raw_output = self.model(torch.tensor(extract_state(board), dtype=torch.float32).to(device), Pi_only = True)
             prob: torch.Tensor = torch.nn.functional.softmax(raw_output, dim=0)
             cum_dist = prob.cumsum(0)
             idx = torch.searchsorted(cum_dist, torch.rand(1, device=device))
             AM: torch.Tensor = torch.zeros_like(prob)
             AM[idx]=1
-            return AM.reshape((3,3))*self.id
+            return AM.detach().cpu().numpy().reshape((3,3))*self.id
                 
 class Train:
     def __init__(self, hyper_params: dict):
@@ -81,7 +93,7 @@ class Train:
             rotation_period = len(values)//len(rb)
             values_means = torch.sum(values.reshape(-1, rotation_period), dim=-1)
             if winner is not None:
-                V_last_state = winner * (self.r_win  - rb.depth*0.01)
+                V_last_state = winner * self.r_win
                 value_labels = torch.clone(values_means).detach()
                 value_labels[-1] = V_last_state
                 Vloss = self.criterionV(values_means, value_labels)
@@ -108,18 +120,17 @@ class Train:
                 episode_loss.V_loss+=torch.abs(Vloss)
                 episode_loss.entropy_loss+=entropy_loss
         
-        self.steps += len(dataset) -1 
-        # self.steps += 1
+        self.steps += 1
 
     def episode(self):
         loss = EpisodeData()
         s0 = Board()
         rb = ReplayBuffer(s0)
-        s0.write(torch.Tensor([
+        s0.write(np.array([
     [1,-1,0,
     0,0,0,
     0,0,0],
-    ]).reshape(3,3).to(device))
+    ]).reshape(3,3))
         player = self.a1
         opp = self.a2
         while not s0.end:
@@ -188,9 +199,11 @@ def train_loop(
             print(f"{round(i/episodes*100)}% {loss}")
     time_elapsed = time.time()-begin_time
     steps_per_second = train.steps/time_elapsed
-    print(f"{train.steps} steps completed in {time_elapsed:.3f} seconds at {steps_per_second:.3f} steps/second")
+    print(f"{train.steps} steps of {hyper_params["replay_buffer_length"]*7} completed in {time_elapsed:.3f} seconds at {steps_per_second:.3f} steps/second")
 
-    if episodes >= 1000: # save the model
+    benchmark(lambda x, id :train.a1(x)*id)
+
+    if episodes >= 2000: # save the model
         print(f"Model saved to {train.save(increment_version=True, extra_info={
             "episodes": episodes,
             "time_elapsed": time_elapsed, 
@@ -201,36 +214,36 @@ def train_loop(
 
 train_res=train_loop()
 
-test_positions = torch.tensor([
-    [1,-1,0,
-    0,0,0,
-    0,0,0],
+# test_positions = torch.tensor([
+#     [1,-1,0,
+#     0,0,0,
+#     0,0,0],
 
-    [1,-1,0,
-    0,1,0,
-    0,0,0],
+#     [1,-1,0,
+#     0,1,0,
+#     0,0,0],
 
-    [1,-1,0,
-    0,1,0,
-    0,0,-1],
+#     [1,-1,0,
+#     0,1,0,
+#     0,0,-1],
 
-    [1,-1,0,
-    0,1,0,
-    1,0,-1],
+#     [1,-1,0,
+#     0,1,0,
+#     1,0,-1],
 
-    [1,-1,0,
-    -1,1,0,
-    1,0,-1],
-], device=device, dtype=torch.float32)
+#     [1,-1,0,
+#     -1,1,0,
+#     1,0,-1],
+# ], device=device, dtype=torch.float32)
 
-logits, values = train_res.model(test_positions)
-probs = torch.nn.functional.softmax(logits, -1)
-from tack_ultils import pt
-for prob, value, position in zip(probs, values, test_positions):
-    pt(position)
-    pt(prob)
-    print(value)
-play(lambda board, id: train_res.a1(board) * id)
+# logits, values = train_res.model(test_positions)
+# probs = torch.nn.functional.softmax(logits, -1)
+# from tack_ultils import pt
+# for prob, value, position in zip(probs, values, test_positions):
+#     pt(position)
+#     pt(prob)
+#     print(value)
+# play(lambda board, id: train_res.a1(board) * id)
 
 # components:
 # 1. Board

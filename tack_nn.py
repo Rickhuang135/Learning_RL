@@ -24,17 +24,13 @@ class A2CModel(nn.Module): # Advantage Actor Critic Model
     def __init__(self):
         super(A2CModel, self).__init__()
         self.encoder = nn.Sequential(
-            nn.Linear(9, 2560),
+            nn.Linear(9, 32),
             nn.ReLU(),
-            nn.Linear(2560, 1800),
+            nn.Linear(32, 32),
             nn.ReLU(),
-            nn.Linear(1800, 1160),
-            nn.ReLU(),
-            nn.Linear(1160,160),
-            nn.ReLU()
         )
-        self.Pi = nn.Linear(160,9)
-        self.V = nn.Linear(160,1)
+        self.Pi = nn.Linear(32,9)
+        self.V = nn.Linear(32,1)
 
     
     def forward(self, state: torch.Tensor, Pi_only = False, V_only = False) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
