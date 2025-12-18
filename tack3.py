@@ -5,6 +5,7 @@ import torch.optim as optim
 from tack_board import *
 from tack_nn import A2CModel
 from tack_ultils import find_model
+from tack_ultils import is_end
 from device import *
 from datetime import datetime
 import time
@@ -42,27 +43,10 @@ class EpisodeData:
     def __str__(self):
         return self.__repr__()
 
-class Agent:
-    def __init__(self, id: int, model: A2CModel):
-        self.model = model
-        self.id = id # id can not be zero
-
-    def __call__(self, board: Board):
-        self.model.eval()
-        with torch.no_grad():
-            raw_output = self.model(torch.tensor(extract_state(board), dtype=torch.float32).to(device), Pi_only = True)
-            prob: torch.Tensor = torch.nn.functional.softmax(raw_output, dim=0)
-            cum_dist = prob.cumsum(0)
-            idx = torch.searchsorted(cum_dist, torch.rand(1, device=device))
-            AM: torch.Tensor = torch.zeros_like(prob)
-            AM[idx]=1
-            return AM.detach().cpu().numpy().reshape((3,3))*self.id
                 
 class Train:
     def __init__(self, hyper_params: dict):
         self.model = A2CModel().to(device)
-        self.a1 = Agent(1, self.model)
-        self.a2 = Agent(-1, self.model)
 
         self.r_win = 1
         self.r_draw = 0
@@ -72,7 +56,7 @@ class Train:
         self.entropy_beta = hyper_params['entropy_beta']
         self.criterionV = nn.MSELoss()
         self.optimiser = optim.Adam(self.model.parameters(),lr=hyper_params['learn_rate'])
-        self.replay_buffer_length = hyper_params['replay_buffer_length']
+        self.replay_buffer_length = hyper_params['replay_length']
         if "model_prefix" in hyper_params.keys():
             model_paths, version = find_model(MODELPATH,hyper_params["model_prefix"])
             self.version = version
@@ -82,6 +66,15 @@ class Train:
                     self.model=torch.load(MODELPATH+model_path,map_location=device, weights_only=False)
         self.steps = 0
         self.verbose = False
+
+    def infer(self, states_flat: np.ndarray):
+        self.model.eval()
+        with torch.no_grad():
+            raw_output = self.model(torch.tensor(states_flat, dtype=torch.float32).to(device), Pi_only = True)
+            prob: torch.Tensor = torch.nn.functional.softmax(raw_output, dim = -1)
+            cum_dist = prob.cumsum(-1)
+            idx = torch.searchsorted(cum_dist, torch.rand(states_flat.shape[0], device=device).reshape(-1,1))
+        return idx.detach().cpu().numpy().flatten()
     
     def backprop_with_symmetries(self, model: A2CModel, rb: ReplayBuffer , winner: int|None = None, episode_loss: EpisodeData | None = None):
         dataset=BoardDataset(rb)
@@ -122,31 +115,6 @@ class Train:
         
         self.steps += 1
 
-    def episode(self):
-        loss = EpisodeData()
-        s0 = Board()
-        rb = ReplayBuffer(s0)
-        s0.write(np.array([
-    [1,-1,0,
-    0,0,0,
-    0,0,0],
-    ]).reshape(3,3))
-        player = self.a1
-        opp = self.a2
-        while not s0.end:
-            if len(rb) == self.replay_buffer_length:
-                self.backprop_with_symmetries(self.model, rb, episode_loss=loss)
-                rb.empty()
-            AM0 = player(s0)
-            s1= s0.next(AM0)
-            rb.append(s1,AM0)
-            player, opp = opp, player
-            del AM0, s0
-            s0 = s1
-
-        if len(rb) > 1:
-            self.backprop_with_symmetries(self.model, rb, winner=s0.winner, episode_loss=loss)
-        return loss
     
     def save(self, increment_version = True, extra_info: dict = {}):
         if 'model_prefix' in self.hyper_params.keys():
@@ -184,24 +152,73 @@ def train_loop(
         'gamma':0.95,
         'entropy_beta':0.03,
         'learn_rate': 0.0001,
-        'replay_buffer_length': 5,
+        'replay_length': 3,
+        'parallel_games': 10,
         # 'model_prefix': '12_12_1245_tack3',
     }
     train = Train(hyper_params)
     print_period = min(episodes//10, 50)
+    replay_length = hyper_params["replay_length"]
+    parallel_games = hyper_params["parallel_games"]
+    no_r = 3
 
+    game_uid = parallel_games
+    states = new_states = np.zeros((parallel_games,9)) # array of flat board states
+    game_ids = np.arange(parallel_games, dtype=np.int32)
+    is_first_player_turn = np.ones(parallel_games, dtype = np.bool) # flat array of 1s
+    rewards = None
+    rb = ReplayBuffer(states, game_ids, is_first_player_turn)
     begin_time = time.time()
-    for i in range(episodes):
-        if episodes-i <= 2:
-            train.verbose=True
-        loss = train.episode()
-        if i % print_period == 0:
-            print(f"{round(i/episodes*100)}% {loss}")
+    while game_uid-parallel_games < episodes:
+        for i in range(replay_length):
+            move_inds = train.infer(states) # get moves from inference
+            new_states = np.copy(states) # get new states from moves
+            new_states[np.arange(parallel_games),move_inds] = (is_first_player_turn-0.5)*2
+            for i, state in enumerate(new_states.reshape(-1,3,3)): # for each new state:
+                end = is_end(state)
+                if end!=-1:
+                    if rewards is None:
+                        rewards = np.zeros(parallel_games, dtype=np.int8)+no_r
+                    rewards[i] = (is_first_player_turn[i]-0.5)*2 if end==1 else 0 # player who just moved wins
+                    game_uid += 1
+                    game_ids[i] = game_uid
+                    new_states[i] = np.zeros(9) # replace with empty board
+            is_first_player_turn= np.invert(is_first_player_turn)
+            if rewards is not None:
+                is_first_player_turn[rewards!=no_r] = True
+            rb.append(new_states=new_states, game_ids=game_ids, is_first_player_turn= is_first_player_turn, new_actions=move_inds, rewards= rewards)
+            rewards = None
+            states = new_states
+        print(rb.to_df())
+        
+        raise Exception("stop for a moment")
+        train.backprop_with_symmetries(train.model, rb)
+        rb.empty()
+
+
+        # for j in range(hyper_params["replay_length"]):
+            # get moves from inference
+            # get new states from moves
+            # for each new state:
+            #   if is end state:
+            #       add reward to reward buffer
+            #       increment episodes_completed
+            #       replace with new empty board
+            # Add new states and moves into replay buffer
+            # flip is_first_player_turn
+
+        # back propegate with replay buffer
+        # empty replay buffer    
+
+
+        # loss = train.episode()
+        # if i % print_period == 0:
+        #     print(f"{round(i/episodes*100)}% {loss}")
     time_elapsed = time.time()-begin_time
     steps_per_second = train.steps/time_elapsed
-    print(f"{train.steps} steps of {hyper_params["replay_buffer_length"]*7} completed in {time_elapsed:.3f} seconds at {steps_per_second:.3f} steps/second")
+    print(f"{train.steps} steps of {hyper_params["replay_length"]*7} completed in {time_elapsed:.3f} seconds at {steps_per_second:.3f} steps/second")
 
-    benchmark(lambda x, id :train.a1(x)*id)
+    # benchmark(lambda x, id :train.a1(x)*id)
 
     if episodes >= 2000: # save the model
         print(f"Model saved to {train.save(increment_version=True, extra_info={

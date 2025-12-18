@@ -29,3 +29,18 @@ def find_model(folder_path: str, model_prefix: str, version: list|None = None) -
     if len(target_model)==0:
         raise Exception(f"Model {model_prefix} not found in {folder_path} ")
     return target_model, version
+
+def is_end(state: np.ndarray) -> int: # 1 for win, 0 for draw, -1 for continue
+    horizontal_sums = state.sum(1)
+    if np.max(np.abs(horizontal_sums))==3:
+        return 1
+    vertical_sums = state.sum(0)
+    if np.max(np.abs(vertical_sums))==3:
+        return 1
+    forward_slash = state[np.arange(3), np.arange(3)]
+    backward_slash = state[np.arange(3), [2,1,0]]
+    if abs(np.sum(forward_slash)) == 3 or abs(np.sum(backward_slash))==3:
+        return 1
+    if len(state[state==0]) == 0: # all squares are filled
+        return 0
+    return -1
