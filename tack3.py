@@ -68,56 +68,37 @@ class Train:
     def backprop_with_symmetries(self, model: A2CModel, rb: ReplayBuffer, episode_loss: EpisodeData | None = None):
         # retrieve data from replay buffer
         states, game_ids, is_first_player_turns, actions, rewards = rb.get_all() 
-        augmented_states = symmetry_generator.rotate(states) # augment with symmetries added in new dimension
-        unique_ids, counts = np.unique(game_ids, return_counts=True) # check for discrete games in data
-        
+        augmented_states = symmetry_generator.rotate(states.reshape((-1,9))) # augment with symmetries added in new dimension
+
         # Sending data to GPU
-        game_ids_torch = torch.tensor(game_ids, dtype=torch.int32).to(device)
         player_ids = torch.tensor((is_first_player_turns-0.5)*2).to(device)
-        augmented_actions = torch.tensor(symmetry_generator.rotate_indicies(actions)).to(device) # The start of each row is the original action
-        rewards_torch = torch.tensor(rewards, dtype=torch.int8).to(device)
+        augmented_actions = symmetry_generator.rotate_indicies(actions).transpose((1,0,2))
+        action_tensors = torch.tensor(augmented_actions).to(device) # The start of each row is the original action
+        rewards_torch = torch.tensor(rewards[:,:-1], dtype=torch.int8).to(device)
 
         # infering with model
         model.train()
         self.optimiser.zero_grad()
         logits, values = model(torch.Tensor(augmented_states.reshape(-1,9)).to(device)) # logits are flat
-        values: torch.Tensor = values.reshape((-1, symmetry_generator.n_ops))
-        log_prob = torch.nn.functional.log_softmax(logits, dim=-1).reshape((-1, symmetry_generator.n_ops, 9))
-        prob = torch.nn.functional.softmax(logits, dim=-1).reshape((-1, symmetry_generator.n_ops, 9))
+        values: torch.Tensor = values.reshape(rb.n_parallel, -1, symmetry_generator.n_ops)
+        log_prob = torch.nn.functional.log_softmax(logits, dim=-1).reshape(rb.n_parallel, -1, symmetry_generator.n_ops, 9)
+        prob = torch.nn.functional.softmax(logits, dim=-1).reshape(rb.n_parallel, -1, symmetry_generator.n_ops, 9)
 
-        # initialise losses
-        Vloss = torch.zeros(1, device=device)
-        Piloss = torch.zeros(1, device=device)
-        for id, count in zip(unique_ids, counts):
-            if count==1:
-                continue
-            # tensors on gpu
-            cvalues = values[game_ids_torch == id]
-            clog_prob = log_prob[game_ids_torch == id]
-            cactions = augmented_actions[game_ids_torch == id]
-            cplayer_ids = player_ids[game_ids_torch == id]
-            crewards = rewards_torch[game_ids_torch == id]
+        # calculate V loss
+        mean_values = torch.mean(values, dim=2)
+        Vlabels = mean_values[:, 1:].detach()
+        Vlabels = torch.where(rewards_torch==no_r, Vlabels, rewards_torch)*self.gamma
+        trainable_values = mean_values[:,:-1]
+        Vloss= self.criterionV(trainable_values, Vlabels)
 
-            # calculate V loss
-            cvalue_means = torch.mean(cvalues, dim=-1)
-            cvalue_labels = cvalue_means[1:].clone().detach() * self.gamma
-            if not (crewards==no_r).all(): # game has ended
-                cvalue_labels[-1] = crewards[crewards!=no_r] * self.gamma
-            cVloss = self.criterionV(cvalue_means[:-1], cvalue_labels)
-            Vloss+=cVloss
-            # print(cvalues)
-            # print(cvalue_means)
-            # print(cvalue_labels)
-            # print(cVloss)
-
-            # calculate policy loss
-            advantage = (cvalue_labels - cvalue_means[:-1].detach())
-            cvalid_actions = cactions[:-1,:]
-            cvalid_log_prob = clog_prob[:-1,:]
-            cvalid_log_prob = cvalid_log_prob.gather(dim=2, index=cvalid_actions.unsqueeze(-1)).squeeze(-1)
-            grad_Pi = cvalid_log_prob.mean(dim=1)*advantage*cplayer_ids[:-1]
-            cPiloss = torch.sum(grad_Pi)
-            Piloss+=cPiloss
+        # calculate Policy loss
+        advantage = Vlabels - trainable_values.detach()
+        actions_expanded = action_tensors[:,:-1].unsqueeze(-1) # add nested layer to match log_prob dimensions
+        valid_log_prob = log_prob[:,:-1].gather(dim=3, index=actions_expanded).squeeze(-1)
+        grad_Pi = valid_log_prob.mean(dim=2)*advantage*player_ids[:,:-1]
+        Piloss = torch.sum(grad_Pi)
+        # print(valid_log_prob)
+        # print(valid_log_prob.shape)
 
         # entropy normalisation
         entropy = -(prob*log_prob).sum()
@@ -174,14 +155,14 @@ class Train:
             return AM.detach().cpu().numpy().reshape((3,3))*id
     
 def train_loop(
-        episodes = 10000,
+        episodes = 50000,
 ):  
     hyper_params = {
         'gamma':0.80,
         'entropy_beta':0.03,
         'learn_rate': 0.0001,
         'replay_length': 4,
-        'parallel_games': 10,
+        'parallel_games': 200,
         # 'model_prefix': '12_12_1245_tack3',
     }
     train = Train(hyper_params)
@@ -230,7 +211,7 @@ def train_loop(
 
     benchmark(train.benchmark_handler)
 
-    if episodes >= 20000: # save the model
+    if episodes >= 100000: # save the model
         print(f"Model saved to {train.save(increment_version=True, extra_info={
             "episodes": episodes,
             "time_elapsed": time_elapsed, 

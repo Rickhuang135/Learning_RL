@@ -56,6 +56,14 @@ class Board:
     def __str__(self):
         return self.__repr__()
 
+    
+def join(array: list):
+    res = np.stack(array)
+    if len(res.shape) == 3: # array contains state
+        return res.transpose((1,0,2))
+    else:
+        return res.transpose((1,0))
+
 class ReplayBuffer:
     # all internal representations of type np.ndarray
     def __init__(self, states: np.ndarray, game_ids: np.ndarray, is_first_player_turn: np.ndarray, rewards: np.ndarray | None = None):
@@ -75,17 +83,20 @@ class ReplayBuffer:
     
     def __len__(self):
         return len(self.states)
-    
-    def get_all(self):
-        all_states = np.concat(self.states)
-        all_game_ids = np.concat(self.game_ids)
-        all_is_first_player_turns = np.concat(self.is_first_player_turn)
-        all_actions = np.concat(self.actions, dtype=np.int8)
-        all_rewards = np.concat(self.rewards)
+
+    def get_all(self, join_method = None):
+        if join_method is None:
+            join_method = join
+
+        all_states = join_method(self.states)
+        all_game_ids = join_method(self.game_ids)
+        all_is_first_player_turns = join_method(self.is_first_player_turn)
+        all_actions = join_method(self.actions)
+        all_rewards = join_method(self.rewards)
         return all_states, all_game_ids, all_is_first_player_turns, all_actions, all_rewards
     
     def to_df(self):
-        all_states, all_game_ids, all_is_first_player_turns, all_actions, all_rewards = self.get_all()
+        all_states, all_game_ids, all_is_first_player_turns, all_actions, all_rewards = self.get_all(np.concat)
 
         df = pd.DataFrame(
             all_states,
@@ -182,17 +193,3 @@ class SymmetryGenerator:
         return matnd[:, self.new_inds]
 
 symmetry_generator = SymmetryGenerator()
-
-def generate_symmetries(mat1d: np.ndarray) -> np.ndarray:
-    opps = [
-        np.copy,
-        np.flip,
-        np.fliplr,
-        np.flipud,
-        np.transpose,
-        np.rot90,
-        lambda x: np.rot90(x, 3),
-    ]
-    mat3x3 = mat1d.reshape(3,3)
-    resulT3x3 = np.stack([f(mat3x3) for f in opps])
-    return resulT3x3.reshape(-1, 9)
