@@ -2,7 +2,7 @@ import torch
 import math
 import time
 from tack_board import Board
-from device import device
+from global_vars import device
 
 class MCTS:
     c = math.sqrt(2) # exploration parameter

@@ -60,7 +60,7 @@ class ReplayBuffer:
     # all internal representations of type np.ndarray
     def __init__(self, states: np.ndarray, game_ids: np.ndarray, is_first_player_turn: np.ndarray, rewards: np.ndarray | None = None):
         self.n_parallel = states.shape[0]
-        self.MNone = - np.ones(self.n_parallel)
+        self.MNone = - np.ones(self.n_parallel, dtype=np.int8)
 
         self.states: list[np.ndarray] = [states]
         self.game_ids = [np.copy(game_ids)]
@@ -76,19 +76,21 @@ class ReplayBuffer:
     def __len__(self):
         return len(self.states)
     
-    def to_df(self):
-        all_game_ids = np.concat(self.game_ids)
+    def get_all(self):
         all_states = np.concat(self.states)
+        all_game_ids = np.concat(self.game_ids)
         all_is_first_player_turns = np.concat(self.is_first_player_turn)
-        all_actions = np.concat(self.actions)
+        all_actions = np.concat(self.actions, dtype=np.int8)
         all_rewards = np.concat(self.rewards)
-
+        return all_states, all_game_ids, all_is_first_player_turns, all_actions, all_rewards
+    
+    def to_df(self):
+        all_states, all_game_ids, all_is_first_player_turns, all_actions, all_rewards = self.get_all()
 
         df = pd.DataFrame(
             all_states,
         )
         df.index.name = "idx"
-            # columns=["state","game_id","action","is_first_player_turn","reward"]
         df["game_id"] = all_game_ids
         df["player_turn"] = all_is_first_player_turns
         df["action"] = all_actions
@@ -150,6 +152,8 @@ def play(Agent,init_board=None,player_turn=False, player_id=-1):
         return play(Agent, board, not player_turn, player_id)
 
 class SymmetryGenerator:
+    noIndex = 9
+
     def __init__(self, operations: list = [
         np.copy,
         np.flip,
@@ -162,16 +166,22 @@ class SymmetryGenerator:
         self.n_ops = len(operations)
         inds = np.arange(9).reshape((3,3))
         self.new_inds = np.concat([f(inds) for f in operations]).reshape(self.n_ops,9)
+        self.augmented_inverses = np.append(np.argsort(self.new_inds, axis=1), np.zeros((self.n_ops,1), dtype=np.int8)+self.noIndex, axis=1) # augmented with noIndex entry
 
-    def rotate_single(self, mat1d: np.ndarray):
+    def rotate_single(self, mat1d: np.ndarray) -> np.ndarray:
         return mat1d[self.new_inds]
     
-    def rotate_indicies(self, indices: np.ndarray):
-        return np.argsort(self.new_inds, axis=1)[:, indices].T
+    def rotate_indicies(self, indices: np.ndarray) -> np.ndarray:
+        valid_indices = indices.copy()
+        valid_indices[indices==-1] = self.noIndex
+        new_indicies = self.augmented_inverses[:, valid_indices].T
+        new_indicies[new_indicies==self.noIndex] = -1
+        return new_indicies
     
-    def rotate(self, matnd: np.ndarray):
-        return matnd[:, self.new_inds].reshape(-1, 9)
+    def rotate(self, matnd: np.ndarray) -> np.ndarray:
+        return matnd[:, self.new_inds]
 
+symmetry_generator = SymmetryGenerator()
 
 def generate_symmetries(mat1d: np.ndarray) -> np.ndarray:
     opps = [

@@ -6,7 +6,7 @@ from tack_board import *
 from tack_nn import A2CModel
 from tack_ultils import find_model
 from tack_ultils import is_end
-from device import *
+from global_vars import *
 from datetime import datetime
 import time
 import json
@@ -19,17 +19,6 @@ torch.set_printoptions(precision= 3)
 torch.serialization.add_safe_globals([A2CModel])
 
 MODELPATH = "./tack_models/"
-
-class BoardDataset(torch.utils.data.Dataset):
-    def __init__(self, rb: ReplayBuffer):
-        self.states = torch.tensor(np.concat([generate_symmetries(s) for s in rb.states]), dtype = torch.float32).to(device)
-        self.actions = torch.tensor(np.concat([generate_symmetries(a) for a in rb.actions]), dtype = torch.float32).to(device)
-    
-    def __len__(self):
-        return len(self.states)
-
-    def __getitem__(self, ind):
-        return self.states[ind], self.actions[ind]
 
 class EpisodeData:
     def __init__(self):
@@ -76,42 +65,70 @@ class Train:
             idx = torch.searchsorted(cum_dist, torch.rand(states_flat.shape[0], device=device).reshape(-1,1))
         return idx.detach().cpu().numpy().flatten()
     
-    def backprop_with_symmetries(self, model: A2CModel, rb: ReplayBuffer , winner: int|None = None, episode_loss: EpisodeData | None = None):
-        dataset=BoardDataset(rb)
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=len(dataset))
-        model.train()
-        for states, actions in dataloader:
-            self.optimiser.zero_grad()
-            logits, values = model(states)
-            rotation_period = len(values)//len(rb)
-            values_means = torch.sum(values.reshape(-1, rotation_period), dim=-1)
-            if winner is not None:
-                V_last_state = winner * self.r_win
-                value_labels = torch.clone(values_means).detach()
-                value_labels[-1] = V_last_state
-                Vloss = self.criterionV(values_means, value_labels)
-            else:
-                value_labels = values_means[1:].detach() * self.gamma
-                Vloss = self.criterionV(values_means[:-1], value_labels)
+    def backprop_with_symmetries(self, model: A2CModel, rb: ReplayBuffer, episode_loss: EpisodeData | None = None):
+        # retrieve data from replay buffer
+        states, game_ids, is_first_player_turns, actions, rewards = rb.get_all() 
+        augmented_states = symmetry_generator.rotate(states) # augment with symmetries added in new dimension
+        unique_ids, counts = np.unique(game_ids, return_counts=True) # check for discrete games in data
+        
+        # Sending data to GPU
+        game_ids_torch = torch.tensor(game_ids, dtype=torch.int32).to(device)
+        player_ids = torch.tensor((is_first_player_turns-0.5)*2).to(device)
+        augmented_actions = torch.tensor(symmetry_generator.rotate_indicies(actions)).to(device) # The start of each row is the original action
+        rewards_torch = torch.tensor(rewards, dtype=torch.int8).to(device)
 
-            As = (values_means[1:]-values_means[:-1]).detach()
-            As = As.repeat(rotation_period, 1).transpose(1,0).flatten()
-            log_prob = torch.nn.functional.log_softmax(logits, dim=-1)
-            valid_actions = actions[:-rotation_period] # filtering out AMNone value
-            valid_log_prob = log_prob[:-rotation_period]
-            Piloss = (-1* valid_log_prob[valid_actions!=0] * As).sum()
-            
-            prob = torch.nn.functional.softmax(logits, dim=-1)
-            entropy = -(prob*log_prob).sum(dim=1).mean()
-            entropy_loss = -1 * self.entropy_beta * entropy
-            
-            (Vloss+Piloss+entropy_loss).backward()
-            self.optimiser.step()
-            
-            if episode_loss is not None:
-                episode_loss.Pi_loss+=torch.abs(Piloss)
-                episode_loss.V_loss+=torch.abs(Vloss)
-                episode_loss.entropy_loss+=entropy_loss
+        # infering with model
+        model.train()
+        self.optimiser.zero_grad()
+        logits, values = model(torch.Tensor(augmented_states.reshape(-1,9)).to(device)) # logits are flat
+        values: torch.Tensor = values.reshape((-1, symmetry_generator.n_ops))
+        log_prob = torch.nn.functional.log_softmax(logits, dim=-1).reshape((-1, symmetry_generator.n_ops, 9))
+        prob = torch.nn.functional.softmax(logits, dim=-1).reshape((-1, symmetry_generator.n_ops, 9))
+
+        # initialise losses
+        Vloss = torch.zeros(1, device=device)
+        Piloss = torch.zeros(1, device=device)
+        for id, count in zip(unique_ids, counts):
+            if count==1:
+                continue
+            # tensors on gpu
+            cvalues = values[game_ids_torch == id]
+            clog_prob = log_prob[game_ids_torch == id]
+            cactions = augmented_actions[game_ids_torch == id]
+            cplayer_ids = player_ids[game_ids_torch == id]
+            crewards = rewards_torch[game_ids_torch == id]
+
+            # calculate V loss
+            cvalue_means = torch.mean(cvalues, dim=-1)
+            cvalue_labels = cvalue_means[1:].clone().detach() * self.gamma
+            if not (crewards==no_r).all(): # game has ended
+                cvalue_labels[-1] = crewards[crewards!=no_r] * self.gamma
+            cVloss = self.criterionV(cvalue_means[:-1], cvalue_labels)
+            Vloss+=cVloss
+            # print(cvalues)
+            # print(cvalue_means)
+            # print(cvalue_labels)
+            # print(cVloss)
+
+            # calculate policy loss
+            advantage = (cvalue_labels - cvalue_means[:-1].detach())
+            cvalid_actions = cactions[:-1,:]
+            cvalid_log_prob = clog_prob[:-1,:]
+            cvalid_log_prob = cvalid_log_prob.gather(dim=2, index=cvalid_actions.unsqueeze(-1)).squeeze(-1)
+            grad_Pi = cvalid_log_prob.mean(dim=1)*advantage*cplayer_ids[:-1]
+            cPiloss = torch.sum(grad_Pi)
+            Piloss+=cPiloss
+
+        # entropy normalisation
+        entropy = -(prob*log_prob).sum()
+        entropy_loss = -1 * self.entropy_beta * entropy
+        (Vloss+Piloss+entropy_loss).backward()
+        self.optimiser.step()
+
+        if episode_loss is not None:
+            episode_loss.Pi_loss+=torch.abs(Piloss)
+            episode_loss.V_loss+=torch.abs(Vloss)
+            episode_loss.entropy_loss+=entropy_loss
         
         self.steps += 1
 
@@ -144,15 +161,26 @@ class Train:
         with open(saved_paths[1], "w") as file:
             json.dump(info_dict, file, indent=4)
         return saved_paths
+
+    def benchmark_handler(self, board: Board, id:int):
+        self.model.eval()
+        with torch.no_grad():
+            raw_output = self.model(torch.tensor((board.state.flatten()), dtype=torch.float32).to(device), Pi_only = True)
+            prob: torch.Tensor = torch.nn.functional.softmax(raw_output, dim=0)
+            cum_dist = prob.cumsum(0)
+            idx = torch.searchsorted(cum_dist, torch.rand(1, device=device))
+            AM: torch.Tensor = torch.zeros_like(prob)
+            AM[idx]=1
+            return AM.detach().cpu().numpy().reshape((3,3))*id
     
 def train_loop(
-        episodes = 1000,
+        episodes = 10000,
 ):  
     hyper_params = {
-        'gamma':0.95,
+        'gamma':0.80,
         'entropy_beta':0.03,
         'learn_rate': 0.0001,
-        'replay_length': 3,
+        'replay_length': 4,
         'parallel_games': 10,
         # 'model_prefix': '12_12_1245_tack3',
     }
@@ -160,8 +188,6 @@ def train_loop(
     print_period = min(episodes//10, 50)
     replay_length = hyper_params["replay_length"]
     parallel_games = hyper_params["parallel_games"]
-    no_r = 3
-
     game_uid = parallel_games
     states = new_states = np.zeros((parallel_games,9)) # array of flat board states
     game_ids = np.arange(parallel_games, dtype=np.int32)
@@ -170,6 +196,7 @@ def train_loop(
     rb = ReplayBuffer(states, game_ids, is_first_player_turn)
     begin_time = time.time()
     while game_uid-parallel_games < episodes:
+        loss = EpisodeData()
         for i in range(replay_length):
             move_inds = train.infer(states) # get moves from inference
             new_states = np.copy(states) # get new states from moves
@@ -189,38 +216,21 @@ def train_loop(
             rb.append(new_states=new_states, game_ids=game_ids, is_first_player_turn= is_first_player_turn, new_actions=move_inds, rewards= rewards)
             rewards = None
             states = new_states
-        print(rb.to_df())
-        
-        raise Exception("stop for a moment")
-        train.backprop_with_symmetries(train.model, rb)
+        # print(rb.to_df().head(10))
+        # raise Exception("stop for a moment")
+        train.backprop_with_symmetries(train.model, rb, loss)
         rb.empty()
+        if game_uid % print_period == 0:
+            print(f"{round(game_uid/episodes*100)}% {loss}")
 
 
-        # for j in range(hyper_params["replay_length"]):
-            # get moves from inference
-            # get new states from moves
-            # for each new state:
-            #   if is end state:
-            #       add reward to reward buffer
-            #       increment episodes_completed
-            #       replace with new empty board
-            # Add new states and moves into replay buffer
-            # flip is_first_player_turn
-
-        # back propegate with replay buffer
-        # empty replay buffer    
-
-
-        # loss = train.episode()
-        # if i % print_period == 0:
-        #     print(f"{round(i/episodes*100)}% {loss}")
     time_elapsed = time.time()-begin_time
     steps_per_second = train.steps/time_elapsed
     print(f"{train.steps} steps of {hyper_params["replay_length"]*7} completed in {time_elapsed:.3f} seconds at {steps_per_second:.3f} steps/second")
 
-    # benchmark(lambda x, id :train.a1(x)*id)
+    benchmark(train.benchmark_handler)
 
-    if episodes >= 2000: # save the model
+    if episodes >= 20000: # save the model
         print(f"Model saved to {train.save(increment_version=True, extra_info={
             "episodes": episodes,
             "time_elapsed": time_elapsed, 
