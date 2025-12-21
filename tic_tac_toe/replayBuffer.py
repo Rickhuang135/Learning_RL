@@ -18,7 +18,6 @@ class ReplayBuffer:
             self.default_r()
         else:
             self.rewards.append(rewards)
-        self.depth = 0
         self.offset = 0
     
     def __len__(self):
@@ -27,20 +26,20 @@ class ReplayBuffer:
     @staticmethod 
     def join(array: list):
         res = np.stack(array)
-        if len(res.shape) == 3: # array contains state
-            return res.transpose((1,0,2))
+        if len(res.shape) == 3: # array has shape (replay_length, n_parallel, 9)
+            return res.transpose((1,0,2)) # new shape (n_parallel, replay_length, 9)
         else:
-            return res.transpose((1,0))
+            return res.transpose((1,0)) # new shape (n_parallel, replay_length)
     
     def get_all(self, join_method = None):
         if join_method is None:
             join_method = self.join
 
-        all_states = join_method(self.states[self.offset:])
-        all_game_ids = join_method(self.game_ids[self.offset:])
-        all_is_first_player_turns = join_method(self.is_first_player_turn[self.offset:])
-        all_actions = join_method(self.actions[self.offset:])
-        all_rewards = join_method(self.rewards[self.offset:])
+        all_states = join_method(self.states[self.offset:]) # (n_parallel, replay_length, 9)
+        all_game_ids = join_method(self.game_ids[self.offset:]) # (n_parallel, replay_length)
+        all_is_first_player_turns = join_method(self.is_first_player_turn[self.offset:]) # (n_parallel, replay_length)
+        all_actions = join_method(self.actions[self.offset:]) # (n_parallel, replay_length)
+        all_rewards = join_method(self.rewards[self.offset:]) # (n_parallel, replay_length)
         return all_states, all_game_ids, all_is_first_player_turns, all_actions, all_rewards
 
     def __str__(self):
@@ -63,7 +62,6 @@ class ReplayBuffer:
         if rewards is not None:
             self.rewards[-1] = rewards
         self.default_r()
-        self.depth+=1
 
     def next(self):
         self.offset = len(self) - 1

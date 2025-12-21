@@ -64,16 +64,12 @@ def train_loop(
             rewards = None
             states = new_states
         train.backprop_with_symmetries(train.model, rb, lc)
-        if record:
-            rb.next()
-        else:
-            rb.empty()
+        rb.empty()
+        if not record:
             lc.empty()
         if step % print_period == 0:
-            if record:
-                rb.write_csv()
-                rb.empty()
-                lc.write_csv()
+            # if record:
+            #     lc.write_csv()
             progress_str = f"{(step*100)//steps}%"
             print(f"{progress_str:<4}{lc.last_loss()}")
             lc.empty()

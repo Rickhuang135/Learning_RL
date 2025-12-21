@@ -42,39 +42,37 @@ class Train:
         return idx.detach().cpu().numpy().flatten()
     
     def backprop_with_symmetries(self, model: A2CModel, rb: ReplayBuffer, lc: LossCollector | None = None):
-        # retrieve data from replay bufferlc.append()
+        # retrieve data from replay buffer, then generating symmetries
         states, game_ids, is_first_player_turns, actions, rewards = rb.get_all() 
-        augmented_states = symmetry_generator.rotate(states.reshape((-1,9))) # augment with symmetries added in new dimension
+        augmented_states = symmetry_generator.rotate(states.reshape((-1,9))) # (n_parallel, replay_length, 9) -> (n_parallel × replay_length, 9) -> (n_parallel x replay_length, n_symmetries, 9)
+        augmented_actions = symmetry_generator.rotate_indicies(actions).transpose((1,0,2)) # (n_parallel, replay_length) -> (replay_length, n_parallel, n_symmetries) -> (n_parallel, replay_length, n_symmetries)
 
         # Sending data to GPU
         player_ids = torch.tensor((is_first_player_turns-0.5)*2).to(device)
-        augmented_actions = symmetry_generator.rotate_indicies(actions).transpose((1,0,2))
         action_tensors = torch.tensor(augmented_actions).to(device) # The start of each row is the original action
-        rewards_torch = torch.tensor(rewards[:,:-1], dtype=torch.int8).to(device)
+        rewards_torch = torch.tensor(rewards[:,:-1], dtype=torch.int8).to(device) # (n_parallel, replay_length - 1)
 
         # infering with model
         model.train()
         self.optimiser.zero_grad()
         logits, values = model(torch.Tensor(augmented_states.reshape(-1,9)).to(device)) # logits are flat
-        values: torch.Tensor = values.reshape(rb.n_parallel, -1, symmetry_generator.n_ops)
-        log_prob = torch.nn.functional.log_softmax(logits, dim=-1).reshape(rb.n_parallel, -1, symmetry_generator.n_ops, 9)
-        prob = torch.nn.functional.softmax(logits, dim=-1).reshape(rb.n_parallel, -1, symmetry_generator.n_ops, 9)
+        values: torch.Tensor = values.reshape(rb.n_parallel, -1, symmetry_generator.n_ops) # (n_parallel x replay_length × n_symmetries) -> (n_parallel, replay_length, n_symmetries)
+        log_prob = torch.nn.functional.log_softmax(logits, dim=-1).reshape(rb.n_parallel, -1, symmetry_generator.n_ops, 9) # (n_parallel x replay_length × n_symmetries, 9) -> (n_parallel, replay_length, n_symmetries, 9)
+        prob = torch.nn.functional.softmax(logits, dim=-1).reshape(rb.n_parallel, -1, symmetry_generator.n_ops, 9) # (n_parallel x replay_length × n_symmetries, 9) -> (n_parallel, replay_length, n_symmetries, 9)
 
         # calculate V loss
-        mean_values = torch.mean(values, dim=2)
-        Vlabels = mean_values[:, 1:].detach()
+        mean_values = torch.mean(values, dim=2) # (n_parallel, replay_length)
+        Vlabels = mean_values[:, 1:].detach() # (n_parallel, replay_length - 1)
         Vlabels = torch.where(rewards_torch==r_none, Vlabels, rewards_torch)*self.gamma
-        trainable_values = mean_values[:,:-1]
+        trainable_values = mean_values[:,:-1] # (n_parallel, replay_length - 1)
         Vloss= self.criterionV(trainable_values, Vlabels)
 
         # calculate Policy loss
-        advantage = Vlabels - trainable_values.detach()
-        actions_expanded = action_tensors[:,:-1].unsqueeze(-1) # add nested layer to match log_prob dimensions
-        valid_log_prob = log_prob[:,:-1].gather(dim=3, index=actions_expanded).squeeze(-1)
-        grad_Pi = valid_log_prob.mean(dim=2)*advantage*player_ids[:,:-1]
-        Piloss = torch.sum(grad_Pi)
-        # print(valid_log_prob)
-        # print(valid_log_prob.shape)
+        advantage = Vlabels - trainable_values.detach() # (n_parallel, replay_length - 1)
+        actions_expanded = action_tensors[:,:-1].unsqueeze(-1) # (n_parallel, replay_length, n_symmetries) -> (n_parallel, replay_length-1 , n_symmetries, 1)  add nested layer to match log_prob dimensions 
+        valid_log_prob = log_prob[:,:-1].gather(dim=3, index=actions_expanded).squeeze(-1) # (n_parallel, replay_length-1, n_symmetries)
+        grad_Pi = valid_log_prob.mean(dim=2)*advantage*player_ids[:,:-1] # (n_parallel, replay_length-1)
+        Piloss = torch.sum(grad_Pi) 
 
         # entropy normalisation
         entropy = -(prob*log_prob).sum()
@@ -83,7 +81,7 @@ class Train:
         self.optimiser.step()
 
         if lc is not None:
-            lc.append(game_ids, prob, grad_Pi, values, Vlabels, Piloss, Vloss, entropy_loss)
+            lc.append(inputs=[augmented_states, augmented_actions, is_first_player_turns, rewards, game_ids], outputs=[prob, grad_Pi, values, Vlabels], loss=[Piloss, Vloss, entropy_loss])
         self.steps += 1
 
     

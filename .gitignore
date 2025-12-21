@@ -1,5 +1,6 @@
 .direnv
 data
 __pycache__
-tack_models
+**/nn_models
 perfectMinMax.json
+**/replay
