@@ -14,19 +14,20 @@ torch.set_printoptions(precision= 3)
 
 
 def train_loop(
-        steps = 3000,
+        steps = 2000,
         record = False,
 ):  
     hyper_params = {
         'gamma':0.80,
         'entropy_beta':0.01,
         'learn_rate': 0.001,
-        'replay_length': 3,
-        'parallel_games': 2,
-        # 'model_prefix': '12_12_1245_tack3',
+        'replay_length': 4,
+        'parallel_games': 5,
+        # 'model_prefix': '12_22_1503_tack3',
     }
     train = Train(hyper_params)
-    print_period = min(steps//50, 100) # print every 100 steps
+    print_period = max(min(steps//50, 100),1) # 1 ≤ print_period ≤ 100
+    write_loss_period = max(min(steps//5, 200), 1) # 1 ≤ write_loss_period ≤ 200
     print(f"print period at {print_period}")
     replay_length = hyper_params["replay_length"]
     parallel_games = hyper_params["parallel_games"]
@@ -44,7 +45,7 @@ def train_loop(
     lc = LossCollector()
     begin_time = time.time()
     for step in range(1, steps+1):
-        for i in range(replay_length):
+        for _ in range(replay_length-1):
             move_inds = train.infer(states) # get moves from inference
             new_states = np.copy(states) # get new states from moves
             new_states[np.arange(parallel_games),move_inds] = (is_first_player_turn-0.5)*2
@@ -64,14 +65,16 @@ def train_loop(
             rewards = None
             states = new_states
         train.backprop_with_symmetries(train.model, rb, lc)
-        rb.empty()
-        if not record:
-            lc.empty()
         if step % print_period == 0:
-            # if record:
-            #     lc.write_csv()
             progress_str = f"{(step*100)//steps}%"
             print(f"{progress_str:<4}{lc.last_loss()}")
+
+        if step % write_loss_period == 0 and record:
+            lc.write()
+            lc.empty()
+
+        rb.empty()
+        if not record:
             lc.empty()
 
 
@@ -95,7 +98,9 @@ def train_loop(
     return train
 
 if __name__ == '__main__':
-    train_res=train_loop(record=True)
+    train_res=train_loop(
+        record=True
+        )
 
 # test_positions = torch.tensor([
 #     [1,-1,0,

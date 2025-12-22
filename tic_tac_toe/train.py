@@ -15,13 +15,7 @@ torch.serialization.add_safe_globals([A2CModel])
 class Train:
     def __init__(self, hyper_params: dict):
         self.model = A2CModel().to(device)
-
         self.hyper_params = hyper_params
-        self.gamma = hyper_params['gamma']
-        self.entropy_beta = hyper_params['entropy_beta']
-        self.criterionV = nn.MSELoss()
-        self.optimiser = optim.Adam(self.model.parameters(),lr=hyper_params['learn_rate'])
-        self.replay_buffer_length = hyper_params['replay_length']
         if "model_prefix" in hyper_params.keys():
             model_paths, version = find_model(MODELPATH,hyper_params["model_prefix"])
             self.version = version
@@ -29,6 +23,11 @@ class Train:
                 if "model" in model_path:
                     print(f"loading model {model_path} of version {self.version}")
                     self.model=torch.load(MODELPATH+model_path,map_location=device, weights_only=False)
+        self.gamma = hyper_params['gamma']
+        self.entropy_beta = hyper_params['entropy_beta']
+        self.criterionV = nn.MSELoss()
+        self.optimiser = optim.Adam(self.model.parameters(),lr=hyper_params['learn_rate'])
+        self.replay_buffer_length = hyper_params['replay_length']
         self.steps = 0
         self.verbose = False
 
@@ -42,15 +41,22 @@ class Train:
         return idx.detach().cpu().numpy().flatten()
     
     def backprop_with_symmetries(self, model: A2CModel, rb: ReplayBuffer, lc: LossCollector | None = None):
-        # retrieve data from replay buffer, then generating symmetries
+        # retrieve data from replay buffer
+        training_shape = (rb.n_parallel, self.replay_buffer_length-1, symmetry_generator.n_ops)
         states, game_ids, is_first_player_turns, actions, rewards = rb.get_all() 
-        augmented_states = symmetry_generator.rotate(states.reshape((-1,9))) # (n_parallel, replay_length, 9) -> (n_parallel × replay_length, 9) -> (n_parallel x replay_length, n_symmetries, 9)
-        augmented_actions = symmetry_generator.rotate_indicies(actions).transpose((1,0,2)) # (n_parallel, replay_length) -> (replay_length, n_parallel, n_symmetries) -> (n_parallel, replay_length, n_symmetries)
 
-        # Sending data to GPU
-        player_ids = torch.tensor((is_first_player_turns-0.5)*2).to(device)
-        action_tensors = torch.tensor(augmented_actions).to(device) # The start of each row is the original action
-        rewards_torch = torch.tensor(rewards[:,:-1], dtype=torch.int8).to(device) # (n_parallel, replay_length - 1)
+        # Send data to GPU
+        states_torch = torch.as_tensor(states.reshape(-1,9), dtype =torch.float32, device=device) # (n_parallel, replay_length, 9) -> (n_parallel × replay_length, 9)
+        actions_tensors = torch.as_tensor(actions[:,:-1], dtype=torch.int32, device=device) # (n_parallel, replay_length - 1)
+        player_ids = torch.as_tensor((is_first_player_turns[:,:-1]-0.5)*2, device=device) # (n_parallel, replay_length - 1)
+        rewards_torch = torch.as_tensor(rewards[:,:-1], dtype=torch.int8, device=device) # (n_parallel, replay_length - 1)
+        
+        # augmenting data
+        augmented_states = symmetry_generator.rotate(states_torch) # (n_parallel × replay_length, 9) -> (n_parallel x replay_length, n_symmetries, 9)
+        augmented_actions = symmetry_generator.rotate_indicies(actions_tensors).permute(0,2,1) # (n_parallel, replay_length-1) -> (n_parallel, n_symmetries, replay_length-1) -> (n_parallel, replay_length-1, n_symmetries)
+        augmented_rewards = torch.broadcast_to(rewards_torch.unsqueeze(-1), training_shape) #(n_parallel, replay_length - 1, n_symmetries)
+        augmented_player_ids = torch.broadcast_to(player_ids.unsqueeze(-1), training_shape) # (n_parallel, replay_length -1 ) -> (n_parallel, replay_length-1, n_symmetries)
+        augmented_game_ids = torch.broadcast_to(torch.as_tensor(game_ids[:,:-1]).unsqueeze(-1), training_shape) # (n_parallel, replay_length) -> (n_parallel, replay_length-1, n_symmetries)
 
         # infering with model
         model.train()
@@ -61,27 +67,33 @@ class Train:
         prob = torch.nn.functional.softmax(logits, dim=-1).reshape(rb.n_parallel, -1, symmetry_generator.n_ops, 9) # (n_parallel x replay_length × n_symmetries, 9) -> (n_parallel, replay_length, n_symmetries, 9)
 
         # calculate V loss
-        mean_values = torch.mean(values, dim=2) # (n_parallel, replay_length)
-        Vlabels = mean_values[:, 1:].detach() # (n_parallel, replay_length - 1)
-        Vlabels = torch.where(rewards_torch==r_none, Vlabels, rewards_torch)*self.gamma
-        trainable_values = mean_values[:,:-1] # (n_parallel, replay_length - 1)
+        Vlabels = values[:, 1:].detach() # (n_parallel, replay_length - 1, n_symmetries)
+        Vlabels = torch.where(augmented_rewards==r_none, Vlabels, augmented_rewards)*self.gamma
+        trainable_values = values[:,:-1] # (n_parallel, replay_length - 1, n_symmetries)
         Vloss= self.criterionV(trainable_values, Vlabels)
 
         # calculate Policy loss
-        advantage = Vlabels - trainable_values.detach() # (n_parallel, replay_length - 1)
-        actions_expanded = action_tensors[:,:-1].unsqueeze(-1) # (n_parallel, replay_length, n_symmetries) -> (n_parallel, replay_length-1 , n_symmetries, 1)  add nested layer to match log_prob dimensions 
+        advantage = Vlabels - trainable_values.detach() # (n_parallel, replay_length - 1, n_symmetries)
+        actions_expanded = augmented_actions[:,:].unsqueeze(-1) # (n_parallel, replay_length, n_symmetries) -> (n_parallel, replay_length-1 , n_symmetries, 1)  add nested layer to match log_prob dimensions 
         valid_log_prob = log_prob[:,:-1].gather(dim=3, index=actions_expanded).squeeze(-1) # (n_parallel, replay_length-1, n_symmetries)
-        grad_Pi = valid_log_prob.mean(dim=2)*advantage*player_ids[:,:-1] # (n_parallel, replay_length-1)
+        grad_Pi = valid_log_prob*advantage*augmented_player_ids # (n_parallel, replay_length-1, n_symmetries)
         Piloss = torch.sum(grad_Pi) 
 
         # entropy normalisation
         entropy = -(prob*log_prob).sum()
         entropy_loss = -1 * self.entropy_beta * entropy
+
+        # append data to logs
+        if lc is not None:
+            lc.append(
+                inputs=[augmented_states, augmented_actions, augmented_player_ids, augmented_rewards, augmented_game_ids], 
+                outputs=[prob, grad_Pi, values, Vlabels], 
+                loss=[Piloss, Vloss, entropy_loss]
+                )
+        
+        # back-propagate and step
         (Vloss+Piloss+entropy_loss).backward()
         self.optimiser.step()
-
-        if lc is not None:
-            lc.append(inputs=[augmented_states, augmented_actions, is_first_player_turns, rewards, game_ids], outputs=[prob, grad_Pi, values, Vlabels], loss=[Piloss, Vloss, entropy_loss])
         self.steps += 1
 
     
@@ -92,14 +104,14 @@ class Train:
             prefix = self.hyper_params['model_prefix']
             version_str = '_'.join(str(x) for x in (self.version))
             saved_paths = [
-                f"./{MODELPATH}/{prefix}_model#{version_str}.pt",
-                f"./{MODELPATH}/{prefix}#{version_str}.json",
+                f"{MODELPATH}/{prefix}_model#{version_str}.pt",
+                f"{MODELPATH}/{prefix}#{version_str}.json",
             ]
         else:
             now = datetime.now().strftime('%m_%d_%H%M')
             saved_paths = [
-                f"./{MODELPATH}/{now}_tack3_model#0_0.pt",
-                f"./{MODELPATH}/{now}_tack3#0_0.json",
+                f"{MODELPATH}{now}_tack3_model#0_0.pt",
+                f"{MODELPATH}{now}_tack3#0_0.json",
             ]
         torch.save(self.model, saved_paths[0])
         info_dict = {

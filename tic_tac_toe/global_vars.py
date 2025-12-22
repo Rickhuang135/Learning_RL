@@ -1,7 +1,6 @@
 # keep this file to plain python
 MODELPATH = "./nn_models/"
-REPLAYPATH = "./replay/rb.csv"
-LOSSPATH = "./replay/lc.csv"
+REPLAYPATH = "./replay/"
 r_draw = 0
 
 # state value representing win, multiply by player_id
@@ -16,9 +15,9 @@ r_none = 13
 #   for any a ∈ ℤ, a < 0, a > 8
 no_action = -1
 
-# test_arr1 = [
-#     1,-1,0,
-#     0,0,0,
-#     0,0,0,
-# ]
-test_arr1 = None
+# test_arr1 = None
+test_arr1 = [
+    1,-1,0,
+    1,-1,0,
+    0,0,0,
+]
