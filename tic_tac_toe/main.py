@@ -1,5 +1,6 @@
 import torch
 from global_vars import *
+from hypr_prams import hyper_params
 from replayBuffer import ReplayBuffer
 from ultils import is_end
 from train import *
@@ -14,17 +15,10 @@ torch.set_printoptions(precision= 3)
 
 
 def train_loop(
-        steps = 2000,
+        steps = 1000,
         record = False,
+        hyper_params = hyper_params,
 ):  
-    hyper_params = {
-        'gamma':0.80,
-        'entropy_beta':0.01,
-        'learn_rate': 0.001,
-        'replay_length': 4,
-        'parallel_games': 5,
-        # 'model_prefix': '12_22_1503_tack3',
-    }
     train = Train(hyper_params)
     print_period = max(min(steps//50, 100),1) # 1 ≤ print_period ≤ 100
     write_loss_period = max(min(steps//5, 200), 1) # 1 ≤ write_loss_period ≤ 200

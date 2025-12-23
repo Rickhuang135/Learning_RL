@@ -74,3 +74,24 @@ class SymmetryGenerator:
         return matnd[:, self.new_inds]
 
 symmetry_generator = SymmetryGenerator()
+
+# state = torch.tensor([
+#     [
+#         1,0,0,
+#         0,0,0,
+#         0,0,0
+#     ],
+#     [
+#         1,0,0,
+#         -1,0,0,
+#         0,0,0
+#     ],
+#     [
+#         1,0,1,
+#         -1,0,0,
+#         0,0,0   
+#     ]
+# ], device=device)
+# print(symmetry_generator.rotate(state).reshape(-1,3,3))
+
+# test symmetries
