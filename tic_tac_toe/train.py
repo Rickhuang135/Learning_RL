@@ -17,7 +17,7 @@ class Train:
         self.model = A2CModel().to(device)
         self.hyper_params = hyper_params
         if "model_prefix" in hyper_params.keys():
-            model_paths, version = find_model(MODELPATH,hyper_params["model_prefix"])
+            model_paths, version = find_model(MODELPATH,hyper_params["model_prefix"], hyper_params["version"] if "version" in hyper_params.keys() else None)
             self.version = version
             for model_path in model_paths:
                 if "model" in model_path:
@@ -77,7 +77,7 @@ class Train:
         advantage = Vlabels - trainable_values.detach() # (n_parallel, replay_length - 1, n_symmetries)
         actions_expanded = augmented_actions[:,:].unsqueeze(-1) # (n_parallel, replay_length, n_symmetries) -> (n_parallel, replay_length-1 , n_symmetries, 1)  add nested layer to match log_prob dimensions 
         valid_log_prob = log_prob.gather(dim=3, index=actions_expanded).squeeze(-1) # (n_parallel, replay_length-1, n_symmetries)
-        grad_Pi = valid_log_prob*advantage*augmented_player_ids # (n_parallel, replay_length-1, n_symmetries)
+        grad_Pi = -1*valid_log_prob*advantage*augmented_player_ids # (n_parallel, replay_length-1, n_symmetries)
         Piloss = torch.sum(grad_Pi)
 
         # entropy normalisation

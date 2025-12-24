@@ -21,7 +21,7 @@ def find_model(folder_path: str, model_prefix: str, version: list|None = None) -
                 version_str = c_version_str
         target_model = list(filter(lambda x: f"#{version_str}." in x, target_model))   
     else:
-        version_str = '_'.join(version)
+        version_str = '_'.join([str(x) for x in version])
         target_model = list(filter(lambda x: version_str in x, target_model_filter))
     if len(target_model)==0:
         raise Exception(f"Model {model_prefix} not found in {folder_path} ")
@@ -48,12 +48,12 @@ class SymmetryGenerator:
 
     def __init__(self, operations: list = [
         torch.clone,
-        lambda x: torch.flip(x, [1,0]),
-        torch.fliplr,
-        torch.flipud,
-        lambda x: torch.transpose(x, 1, 0),
-        torch.rot90,
-        lambda x: torch.rot90(x, 3),
+        # lambda x: torch.flip(x, [1,0]),
+        # torch.fliplr,
+        # torch.flipud,
+        # lambda x: torch.transpose(x, 1, 0),
+        # torch.rot90,
+        # lambda x: torch.rot90(x, 3),
     ]):
         self.n_ops = len(operations)
         inds = torch.arange(9, dtype=torch.int32, device=device).reshape((3,3))
