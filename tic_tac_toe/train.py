@@ -26,7 +26,7 @@ class Train:
         self.gamma = hyper_params['gamma']
         self.entropy_beta = hyper_params['entropy_beta']
         self.criterionV = nn.MSELoss()
-        self.optimiser = optim.Adam(self.model.parameters(),lr=hyper_params['learn_rate'])
+        self.optimiser = optim.RMSprop(self.model.parameters(),lr=hyper_params['learn_rate'])
         self.replay_buffer_length = hyper_params['replay_length']
         self.steps = 0
         self.verbose = False
@@ -133,10 +133,8 @@ class Train:
         self.model.eval()
         with torch.no_grad():
             raw_output = self.model(torch.tensor((board.state.flatten()), dtype=torch.float32).to(device), Pi_only = True)
-            prob: torch.Tensor = torch.nn.functional.softmax(raw_output, dim=0)
-            cum_dist = prob.cumsum(0)
-            idx = torch.searchsorted(cum_dist, torch.rand(1, device=device))
-            AM: torch.Tensor = torch.zeros_like(prob)
+            idx = torch.argmax(raw_output)
+            AM: torch.Tensor = torch.zeros_like(raw_output)
             AM[idx]=1
             return AM.detach().cpu().numpy().reshape((3,3))*id
     

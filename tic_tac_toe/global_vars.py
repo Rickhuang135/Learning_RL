@@ -15,9 +15,9 @@ r_none = 13
 #   for any a ∈ ℤ, a < 0, a > 8
 no_action = -1
 
-# test_arr1 = None
-test_arr1 = [
-    1,-1,0,
-    1,-1,0,
-    0,0,0,
-]
+test_arr1 = None
+# test_arr1 = [
+#     0,0,-1,
+#     0,1,0,
+#     0,0,0,
+# ]

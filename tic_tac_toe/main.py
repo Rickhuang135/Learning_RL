@@ -15,7 +15,7 @@ torch.set_printoptions(precision= 3)
 
 
 def train_loop(
-        steps = 1000,
+        steps = 100_000,
         record = False,
         hyper_params = hyper_params,
 ):  
@@ -93,8 +93,9 @@ def train_loop(
 
 if __name__ == '__main__':
     train_res=train_loop(
-        record=True
-        )
+        # steps = 50,
+        # record=True,
+    )
 
 # test_positions = torch.tensor([
 #     [1,-1,0,
