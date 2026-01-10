@@ -1,13 +1,12 @@
-import torch
+import numpy as np
 import math
 import time
-from tic_tac_toe.board import Board
-from device import device
+from board import Board
 
 class MCTS:
     c = math.sqrt(2) # exploration parameter
 
-    def __init__(self, actions: torch.Tensor = torch.empty(0, device=device), leaf = False):
+    def __init__(self, actions: np.ndarray = np.zeros(0), leaf = False):
         self.head:MCTS | None = None
         if leaf:
             self.leaf = self.terminal = True
@@ -17,10 +16,10 @@ class MCTS:
         self.n_terminal_children = 0
         self.children: list[MCTS | None] = [None for _ in actions]
         self.visits = 0
-        self.optimal = None
+        self.optimal = None  # only exists for terminal nodes
         self.expanding_action= None
         self.minimising = True
-        self.value= 0
+        self.value= 0   # total value
         self.mean_value = 0
 
     def get_root(self):
@@ -37,12 +36,12 @@ class MCTS:
         if child is None:
             self.expanding_action = action_ind
             depth = len(chain)
-            ids=torch.arange(depth, device=device)
-            chain_values = torch.ones(depth, device=device)
+            ids=np.arange(depth)
+            chain_values = np.ones(depth)
             chain_values[ids%2==0] *= id0
             chain_values[ids%2!=0] *= id0*-1
-            AM = torch.zeros(9, device=device)
-            AM[torch.stack(chain, dim=0)] = chain_values
+            AM = np.zeros(9)
+            AM[np.stack(chain, axis=0)] = chain_values
             return self, AM.reshape(3,3), depth
         
         if child.terminal:
@@ -80,9 +79,8 @@ class MCTS:
             sign = 1
         return self.mean_value + sign* self.c*math.sqrt(math.log(self.head.visits)/self.visits)
     
-
-    def pick_action_child(self, train=True) -> tuple: #recursively finds next action to explore
-        if self.terminal and train:
+    def pick_action_child(self) -> tuple: #recursively finds next action to explore
+        if self.terminal:
             raise Exception(f"Terminal state doesn't need to be explored")
         next_action = None
         next_child = None
@@ -93,7 +91,7 @@ class MCTS:
         for child, action in zip(self.children, self.actions):
             if child is None:
                 return action, None
-            elif child.terminal and train:
+            elif child.terminal:
                 continue
             else:
                 UCBi = child.UCB()
@@ -106,7 +104,8 @@ class MCTS:
     def append(self, child):
         child.head=self
         child.minimising = not self.minimising
-        self.children[torch.where(self.actions==self.expanding_action)[0]] = child
+        temp = np.where(self.actions==self.expanding_action)
+        self.children[temp[0][0]] = child
         return child
     
     def percolate_up(self, value, terminal=False) -> None:
@@ -132,6 +131,27 @@ class MCTS:
         if self.head is not None:
             self.head.percolate_up(value, self.terminal)
 
+    def infer(self):
+        best_action_ind = 0
+        if self.minimising:
+            best_value = 100
+        else:
+            best_value = -100
+
+        for i, child in enumerate(self.children):
+            if child is None: # This child node hasn't been explored
+                c_value = 7
+            elif child.terminal == True:
+                c_value = child.optimal
+            else:
+                c_value = child.mean_value
+            
+            if self.minimising and c_value < best_value or not self.minimising and c_value > best_value: # type:ignore
+                best_value = c_value
+                best_action_ind = i
+
+        return self.actions[best_action_ind]
+
     def to_dict(self):
         result = {
             "value": self.optimal if self.terminal else self.mean_value,
@@ -156,24 +176,23 @@ class MCTS:
     # create leaf based on first action and value
 
 def ind_to_AM(index_out_of_8):
-    result = torch.zeros(9, device=device)
+    result = np.zeros(9)
     result[index_out_of_8] = 1
     return result.reshape(3,3)
 
 def get_actions(board: Board):
-    return torch.where(board.state.flatten()==0)[0]
+    return np.where(board.state.flatten()==0)[0]
 
 def random_move(board: Board, id=1):
     actions = get_actions(board)
-    # print(actions)
-    ind = actions[torch.randint(low=0, high=actions.numel(), size=(1,))]
+    ind = np.random.choice(actions)
     return ind_to_AM(ind) * id
 
 def search(
         board: Board,
         id = 1,
         head: MCTS | None = None,
-        run_time = 0.200, # in seconds
+        run_time = 0.500, # in seconds
         n_runs = 4000
 ):
     start_time = time.time()
@@ -211,24 +230,20 @@ def search(
         new_node.percolate_up(value)
         # print(current_board)
         # print(f"added now node {new_node}")
-    print(f"{current_run} runs completed")
+    # print(f"{current_run} runs completed")
     return head
 
 def infer(s: Board, id=1):
     root=search(s, id=id)
-    child_values = [ (None if c is None else c.optimal) for c in root.children]
-    print(root)
-    print(child_values)
-    return ind_to_AM(root.pick_action_child(train=False)[0])*id
+    # child_values = [ (None if c is None else c.optimal) for c in root.children]
+    # print(root)
+    # print(child_values)
+    return ind_to_AM(root.infer())*id
 
-# s0 = Board()
-# s0.write(torch.Tensor(
-#     [[ -1, 0, 1,],
-#     [ 0,  -1,  0,],
-#     [ 0,  0,  0,],]
-# ).to(device))
-
-# root=infer(s0, 1)
-
-# from tack_board import play
-# play(infer)
+if __name__ == "__main__":
+    from benchmark import benchmark
+    benchmark(infer, n_runs=20)
+    from play import play
+    s0 = Board()
+    root=infer(s0, 1)
+    play(infer)

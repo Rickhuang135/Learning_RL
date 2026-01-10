@@ -5,10 +5,7 @@ from replayBuffer import ReplayBuffer
 from ultils import is_end
 from train import *
 import time
-
 import numpy as np
-
-from benchmark import benchmark
 
 torch.set_printoptions(sci_mode=False)
 torch.set_printoptions(precision= 3)
@@ -79,7 +76,6 @@ def train_loop(
     print(f"{batch_size} values per batch")
     print(f"{train.steps} steps completed in {time_elapsed:.3f} seconds at {steps_per_second:.3f} steps/second")
 
-    benchmark(train.benchmark_handler)
 
     if steps >= 10000: # save the model
         print(f"Model saved to {train.save(increment_version=True, extra_info={
@@ -92,10 +88,14 @@ def train_loop(
     return train
 
 if __name__ == '__main__':
+    from benchmark import benchmark
     train_res=train_loop(
-        # steps = 50,
-        # record=True,
+        steps = 0,
+        record=True,
     )
+    benchmark(train_res.benchmark_handler)
+    from play import play
+    play(train_res.benchmark_handler)
 
 # test_positions = torch.tensor([
 #     [1,-1,0,

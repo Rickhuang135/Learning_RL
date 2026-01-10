@@ -1,4 +1,4 @@
-from board import *
+from board import Board
 import numpy as np
 
 class P:
@@ -71,7 +71,7 @@ def prune(
 def infer(s: Board, id=1):
     p=prune(s, id=id)
     child_values = [c.value for c in p.children]
-    print(child_values)
+    # print(child_values)
     AM = np.zeros(9)
     AM[p.actions[child_values.index(min(child_values))]]=id # type:ignore
     return AM.reshape(3,3)
@@ -81,4 +81,10 @@ def value(s: Board):
     child_values = [c.value for c in p.children]
     return min(child_values) # type:ignore
 
-# play(infer)
+if __name__ == "__main__":
+    from benchmark import benchmark
+    benchmark(infer, n_runs=20)
+    from play import play
+    s0 = Board()
+    root=infer(s0, 1)
+    play(infer)

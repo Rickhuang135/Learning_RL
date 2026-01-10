@@ -1,5 +1,5 @@
 {
-  description = "A basic flake with a shell";
+  description = "A flake for RL";
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   inputs.systems.url = "github:nix-systems/default";
   inputs.flake-utils = {
@@ -32,7 +32,7 @@
             stdenv.cc.cc.lib
             libsForQt5.wrapQtAppsHook
             ninja
-	          cudatoolkit
+            cudatoolkit
             python313Packages.pandas
             (python313Packages.matplotlib.override {
               enableQt = true;
